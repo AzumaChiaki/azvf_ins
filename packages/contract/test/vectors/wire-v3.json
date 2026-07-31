@@ -1,0 +1,66 @@
+{
+  "fixtureVersion": 1,
+  "wireProtocolVersion": 3,
+  "token": {
+    "defaultIssuer": "azvf-console",
+    "defaultAudience": "azvf-installer",
+    "supportedClientContextVersion": 1,
+    "clientContextCases": {
+      "missing": 0,
+      "low": 0,
+      "current": 1
+    }
+  },
+  "manifest": {
+    "resource": {
+      "id": "resource-1",
+      "name": "demo",
+      "resType": 32,
+      "packageName": null,
+      "size": 3,
+      "sha256": "abababababababababababababababababababababababababababababababab",
+      "md5": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "watchfaceId": null,
+      "version": "2.0.0",
+      "chunkSize": 16384,
+      "totalChunks": 1
+    },
+    "chunkHashes": [
+      "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+    ],
+    "canonical": "{\"formatVersion\":2,\"id\":\"resource-1\",\"name\":\"demo\",\"resType\":32,\"packageName\":null,\"size\":3,\"sha256\":\"abababababababababababababababababababababababababababababababab\",\"md5\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"watchfaceId\":null,\"resourceVersion\":\"2.0.0\",\"chunkSize\":16384,\"totalChunks\":1,\"chunkHashes\":[\"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\"]}",
+    "sha256": "fafee5cf1f4cbd2e89dd581498ee4a265140d01ebb33c50b6b9bf62ac2bc7e16"
+  },
+  "devices": {
+    "valid": [
+      {
+        "input": "aa-bb-cc-dd-ee-ff",
+        "normalized": "AA:BB:CC:DD:EE:FF"
+      },
+      {
+        "input": "AA:BB:CC:DD:EE:FF",
+        "normalized": "AA:BB:CC:DD:EE:FF"
+      },
+      {
+        "input": "serial_AbC-123",
+        "normalized": "serial_AbC-123"
+      }
+    ],
+    "invalid": [
+      "",
+      "short",
+      "AA BB CC DD EE FF",
+      "../device"
+    ]
+  },
+  "resTypes": {
+    "watchface": 16,
+    "firmware": 32,
+    "quickApp": 64
+  },
+  "limits": {
+    "defaultChunkSize": 262144,
+    "maximumChunkPayload": 1048576,
+    "minimumPersistedChunkSize": 16384
+  }
+}

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#080b12" />
+    <meta name="robots" content="noindex" />
+    <style>
+      html, body { min-width: 320px; min-height: 100%; margin: 0; color: #edf3ff; background: #080b12; }
+      .boot-fallback { max-width: 32rem; margin: 0 auto; padding: 2rem 1rem; font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .boot-fallback strong { display: block; margin-bottom: .45rem; font-size: 1.15rem; }
+      .boot-fallback span { display: block; color: #93a1b8; }
+      .boot-fallback .boot-fallback-sub { margin-top: .6rem; color: #d8b24a; }
+    </style>
+    <title>资源安装器</title>
+  </head>
+  <body>
+    <div id="root"><div class="boot-fallback" data-installer-boot-fallback role="status"><strong>正在加载安装器…</strong><span>如果页面长时间停留在这里，请刷新后重试。</span></div></div>
+    <script type="module" src="/src/web/install/main.tsx" onerror="window.__azBootFailed&&window.__azBootFailed()"></script>
+    <script nomodule>
+      document.getElementById('root').innerHTML = '<div class="boot-fallback" role="alert"><strong>浏览器版本过旧</strong><span>安装器需要电脑版最新 Chrome 或 Edge。请从 <a href="https://www.google.cn/chrome/" style="color:#9cc5ff">google.cn/chrome</a> 或 <a href="https://www.microsoft.com/zh-cn/edge/download" style="color:#9cc5ff">microsoft.com/edge</a> 下载支持的浏览器。</span></div>';
+    </script>
+    <script>
+      (function () {
+        var MOUNT = '__APP_MOUNTED__';
+        function inWeChat() { return /MicroMessenger|QQ\//i.test(navigator.userAgent); }
+        window.__azBootFailed = function () {
+          if (window[MOUNT]) return;
+          var root = document.getElementById('root');
+          if (!root) return;
+          root.innerHTML = '<div class="boot-fallback" role="alert"><strong></strong><span></span><span class="boot-fallback-sub"></span></div>';
+          root.querySelector('strong').textContent = '页面加载失败';
+          root.querySelector('span').textContent = '请刷新重试，或在电脑上改用最新版 Chrome / Edge 浏览器打开。也可从 google.cn/chrome 或 microsoft.com/edge 下载。';
+          if (inWeChat()) root.querySelector('.boot-fallback-sub').textContent = '检测到微信内置浏览器：请点击右上角「···」→「在浏览器打开」；安装设备需在电脑版 Chrome / Edge 中进行。';
+        };
+        window.addEventListener('error', function (event) {
+          if (window[MOUNT]) return;
+          var target = event.target;
+          if (!target || !target.tagName) return;
+          var tag = target.tagName.toUpperCase();
+          if (tag === 'SCRIPT' || (tag === 'LINK' && target.rel === 'stylesheet')) window.__azBootFailed();
+        }, true);
+        window.setTimeout(function () { window.__azBootFailed(); }, 12000);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,29 @@
+{
+  "name": "@azvf/contract",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "安装协议契约：资源元数据、会话请求/响应、令牌契约、设备标识符、表盘 ID 字段与分片尺寸约定",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

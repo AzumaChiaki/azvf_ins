@@ -1,0 +1,41 @@
+{
+  "name": "@azvf/installer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "流式安装端：校验授权令牌、按会话再加密分片流、三线程流水线安装到设备",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:web": "vite",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true});require('node:fs').rmSync('dist-web',{recursive:true,force:true})\"",
+    "build": "pnpm run clean && tsc -p tsconfig.json && vite build",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "typecheck:web": "tsc -p tsconfig.web.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@azvf/contract": "workspace:*",
+    "@azvf/internal-client": "workspace:*",
+    "@azvf/ui": "workspace:*",
+    "@fastify/cors": "^10.0.1",
+    "fastify": "^5.1.0",
+    "jose": "^5.9.6",
+    "nanoid": "^5.0.9",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.8"
+  }
+}

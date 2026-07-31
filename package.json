@@ -1,0 +1,27 @@
+{
+  "name": "azvf-ins",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@11.4.0",
+  "engines": {
+    "node": ">=22.16"
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "pnpm clean && pnpm -r --sort build",
+    "typecheck": "pnpm --filter @azvf/contract build && pnpm --filter @azvf/internal-client build && pnpm -r --if-present typecheck",
+    "test": "pnpm --filter @azvf/contract build && pnpm --filter @azvf/internal-client build && pnpm -r --if-present test",
+    "verify:vectors": "node scripts/verify-vectors.mjs",
+    "verify:boundary": "node scripts/check-boundary.mjs",
+    "verify:secrets": "node scripts/secret-scan.mjs",
+    "audit:licenses": "node scripts/license-inventory.mjs",
+    "sbom:generate": "node scripts/generate-sbom.mjs",
+    "smoke": "node scripts/standalone-smoke.mjs",
+    "verify": "pnpm build && pnpm typecheck && pnpm test && pnpm verify:vectors && pnpm verify:boundary && pnpm verify:secrets && pnpm audit:licenses && pnpm sbom:generate && pnpm smoke"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
