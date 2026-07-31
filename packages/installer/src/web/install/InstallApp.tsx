@@ -418,8 +418,13 @@ export function InstallApp() {
       </div>
       <header className="site-banner">
         <div className="site-banner-inner">
-          <p className="eyebrow">{runtimeConfig.brand}</p>
-          <h1>资源安装器</h1>
+          <div className="site-banner-heading">
+            <p className="eyebrow">{runtimeConfig.brand}</p>
+            <h1>资源安装器</h1>
+          </div>
+          <div className="site-banner-actions">
+            <a className="site-banner-link" href={runtimeConfig.redeemUrl}>返回核销页</a>
+          </div>
         </div>
       </header>
       <main className="installer-container">

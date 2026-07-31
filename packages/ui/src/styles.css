@@ -79,9 +79,13 @@ textarea { resize: vertical; }
 .installer-shell { position: relative; isolation: isolate; display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
 
 .site-banner { position: sticky; top: 0; z-index: 20; width: 100%; border-bottom: 1px solid var(--line); background: rgba(9, 12, 19, .92); backdrop-filter: blur(10px); }
-.site-banner-inner { width: min(100%, 940px); margin: 0 auto; padding: .8rem clamp(1rem, 4vw, 1.5rem); }
+.site-banner-inner { width: min(100%, 940px); margin: 0 auto; padding: .8rem clamp(1rem, 4vw, 1.5rem); display: flex; align-items: center; gap: 1rem; }
+.site-banner-heading { min-width: 0; }
 .site-banner .eyebrow { margin: 0 0 .2rem; }
 .site-banner h1 { margin: 0; font-size: clamp(1.15rem, 2.6vw, 1.55rem); line-height: 1.1; }
+.site-banner-actions { margin-left: auto; flex-shrink: 0; }
+.site-banner-link { display: inline-flex; align-items: center; min-height: 34px; padding: .35rem .8rem; color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: var(--radius-sm); text-decoration: none; font-size: .82rem; transition: border-color .16s var(--ease), color .16s var(--ease); }
+.site-banner-link:hover { border-color: var(--line-strong); color: var(--accent); }
 
 .installer-container { position: relative; z-index: 1; flex: 1 0 auto; width: min(100%, 940px); margin: 0 auto; padding: clamp(1.4rem, 4vw, 2.4rem) clamp(1rem, 4vw, 1.5rem) 2.6rem; }
 
@@ -177,6 +181,7 @@ textarea { resize: vertical; }
 .modal-head button { width: auto; min-height: 34px; padding: .35rem .7rem; color: var(--ink); background: transparent; border: 1px solid var(--line); }
 .modal-head button:hover:not(:disabled) { background: rgba(255, 255, 255, .06); border-color: var(--line-strong); }
 .modal-intro { margin: .3rem 0 1rem; color: var(--muted); font-size: .86rem; line-height: 1.6; }
+.license-section { display: grid; gap: .5rem; margin-top: 1.1rem; }
 .authkey-steps { margin: 0; padding-left: 1.3rem; display: grid; gap: .5rem; color: var(--ink); font-size: .9rem; line-height: 1.55; }
 .authkey-steps li { padding-left: .2rem; }
 .device-manager-list { list-style: none; margin: 0 0 .8rem; padding: 0; display: grid; gap: .7rem; }
