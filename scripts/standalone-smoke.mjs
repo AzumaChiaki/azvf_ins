@@ -155,7 +155,7 @@ try {
     HOST: '127.0.0.1',
     PORT: String(installerPort),
     LOG_LEVEL: 'silent',
-    AUTHORIZER_URL: `http://127.0.0.1:${authorizerPort}/`,
+    CONSOLE_URL: `http://127.0.0.1:${authorizerPort}/`,
     ALLOW_INSECURE_INTERNAL_HTTP: 'true',
     INTERNAL_CLIENT_ID: 'installer',
     INTERNAL_KEY_ID: 'v1',
