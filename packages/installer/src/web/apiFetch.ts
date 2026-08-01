@@ -18,12 +18,19 @@ export class ReauthRedirect extends Error {
 }
 
 type Teardown = () => Promise<void> | void
+type ReauthHandler = (target: string) => Promise<void> | void
 
 let teardown: Teardown | undefined
+let reauthHandler: ReauthHandler | undefined
 
 /** 注册跳转前的清理动作（关闭设备会话）。 */
 export function onBeforeReauth(handler: Teardown | undefined): void {
   teardown = handler
+}
+
+/** Registers UI-owned guidance. Without a handler the safe legacy navigation remains available. */
+export function onReauthRequired(handler: ReauthHandler | undefined): void {
+  reauthHandler = handler
 }
 
 /** 目标只接受同源绝对路径或 http(s) 地址，避免被诱导跳到 javascript: 之类的方案。 */
@@ -45,6 +52,7 @@ export async function apiFetch(input: string, init?: RequestInit): Promise<Respo
   const target = safeTarget(instruction)
   if (!target) return response
   try { await teardown?.() } catch { /* 清理失败也要跳转 */ }
-  window.location.href = target
+  if (reauthHandler) await reauthHandler(target)
+  else window.location.href = target
   throw new ReauthRedirect(target)
 }

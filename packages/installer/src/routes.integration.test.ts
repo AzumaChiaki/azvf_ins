@@ -178,6 +178,17 @@ describe('Installer authenticated v3 route', () => {
           'x-azvf-json-signature': responseMac(nonce, 200, url.pathname, digest, body.length, timestamp),
         } })
       }
+      if (url.pathname.endsWith('/internal/site-content')) {
+        expect(url.searchParams.get('page')).toBe('install')
+        const body = Buffer.from(JSON.stringify({ page: 'install', sections: [{ id: 'help', title: '帮助', links: [] }] }))
+        const digest = createHash('sha256').update(body).digest('hex')
+        return new Response(body, { headers: {
+          'x-azvf-json-sha256': digest,
+          'x-azvf-json-size': String(body.length),
+          'x-azvf-json-timestamp': timestamp,
+          'x-azvf-json-signature': responseMac(nonce, 200, `${url.pathname}${url.search}`, digest, body.length, timestamp),
+        } })
+      }
       if (url.pathname.endsWith('/meta')) {
         const digest = createHash('sha256').update(metaBody).digest('hex')
         return new Response(metaBody, { headers: {
@@ -204,6 +215,9 @@ describe('Installer authenticated v3 route', () => {
           capability: 'C'.repeat(43),
           capabilityExpiresAt: Date.now() + 60_000,
           signedMeta: meta,
+          throttle: { mode: 'enforced', sessionId: requestBody.sessionId,
+            ratePerSecond: 100 * 1024, burstBytes: 256 * 1024, sampleWindowMs: 10_000 },
+          riskDecision: { action: 'allow', reason: 'allowed' },
         }))
         const digest = createHash('sha256').update(body).digest('hex')
         return new Response(body, { headers: {
@@ -307,6 +321,10 @@ describe('Installer authenticated v3 route', () => {
       expect(session.watchfaceTransform?.md5).toBe(createHash('md5').update(rewritten).digest('hex'))
       expect(consumed).toBe(1)
 
+      const siteContent = await app.inject({ method: 'GET', url: '/api/site-content' })
+      expect(siteContent.statusCode).toBe(200)
+      expect(siteContent.json().sections[0].id).toBe('help')
+
       const secondToken = await new SignJWT({
         grant: 'cardkey', sku: 'sku', resourceIds: [meta.id], entitlementId: 'entitlement-integration',
         deviceAddr: 'AA:BB:CC:DD:EE:FE', tier: 'basic', installConcurrency: 1, clientContextVersion: 1,
@@ -404,6 +422,7 @@ describe('Installer authenticated v3 route', () => {
         expect(telemetryEvents).toContain('install.started')
         expect(telemetryEvents).toContain('download.started')
         expect(telemetryEvents).toContain('download.completed')
+        expect(telemetryEvents).toContain('install.sampled')
         expect(telemetryEvents).toContain('install.completed')
       })
 

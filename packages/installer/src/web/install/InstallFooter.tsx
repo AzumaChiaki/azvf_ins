@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { runtimeConfig } from '@azvf/ui/runtime-config'
 
 /**
@@ -8,10 +8,33 @@ import { runtimeConfig } from '@azvf/ui/runtime-config'
  */
 export function InstallFooter() {
   const [showLicenses, setShowLicenses] = useState(false)
+  const [sections, setSections] = useState<Array<{
+    id: string; title: string; links: Array<{ id: string; label: string; kind: 'link' | 'action' | 'text'; href?: string; actionId?: string }>
+  }>>([])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void fetch('/api/site-content', { cache: 'force-cache', signal: controller.signal })
+      .then((response) => response.ok ? response.json() : undefined)
+      .then((content: { sections?: unknown } | undefined) => {
+        if (Array.isArray(content?.sections)) setSections(content.sections as typeof sections)
+      })
+      .catch(() => undefined)
+    return () => controller.abort()
+  }, [])
   return (
     <>
       <footer className="az-footer">
         <div className="az-footer-panel">
+          {sections.length > 0 && <div className="az-footer-grid">
+            {sections.map((section) => <section key={section.id} className="az-footer-col">
+              <span className="az-footer-title">{section.title}</span>
+              {section.links.map((link) => link.kind === 'link' && link.href
+                ? <a key={link.id} className="az-footer-link" href={link.href} target={link.href.startsWith('/') ? undefined : '_blank'} rel="noopener noreferrer">{link.label}</a>
+                : link.kind === 'action' && link.actionId === 'open-resource-contact'
+                  ? <a key={link.id} className="az-footer-link" href={runtimeConfig.redeemUrl}>{link.label}</a>
+                  : <span key={link.id} className="az-footer-link">{link.label}</span>)}</section>)}
+          </div>}
           <div className="az-footer-bottom">
             <span className="az-footer-copyright">
               本程序基于 AstroBox-NG（AGPL-3.0，含署名附加条款）实现的设备通信协议。

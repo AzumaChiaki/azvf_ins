@@ -16,6 +16,16 @@ export interface InstallSession {
   resourceCapability: string
   capabilityExpiresAt: number
   deviceAddress: string
+  clientIp: string
+  clientAttributes?: unknown
+  throttle: {
+    mode: 'enforced' | 'disabled'
+    sessionId: string
+    ratePerSecond?: number
+    burstBytes?: number
+    sampleWindowMs?: number
+  }
+  lastHeartbeatAt?: number
   /** HKDF 派生的用途隔离密钥，全部不可导出。 */
   cryptoKeys: SessionCryptoKeys
   controlContext: SessionControlContext

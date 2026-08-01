@@ -24,6 +24,7 @@ import {
 import type { MiWearSession, InstallProgress } from './miwear/session.js'
 import { apiFetch } from './apiFetch.js'
 import { PlaintextQueue } from './plaintextQueue.js'
+import { collectClientAttributes } from './clientAttributes.js'
 
 interface SecureSessionResponse extends SessionInitResponse {
   controlToken: string
@@ -236,6 +237,7 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
     clientPublicKey,
     resourceId: opts.resourceId,
     deviceAddr: deviceId,
+    clientAttributes: collectClientAttributes(),
   }
   const response = await apiFetch('/api/session', {
     method: 'POST',

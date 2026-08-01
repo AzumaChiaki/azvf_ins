@@ -5,6 +5,7 @@ import {
   configureInternalClient,
   consumeEntitlement,
   createSignedRequest,
+  EntitlementDecisionError,
   fetchMeta,
   fetchPlaintextChunks,
   reportInstallationEvent,
@@ -75,6 +76,9 @@ describe('Console authenticated streaming client', () => {
       signedMeta: { id: 'resource-1' },
       idempotent: false,
       installsUsed: 1,
+      throttle: { mode: 'enforced', sessionId: capabilityAccess.sessionId,
+        ratePerSecond: 102400, burstBytes: 262144, sampleWindowMs: 10000 },
+      riskDecision: { action: 'allow', reason: 'allowed' },
     }))
     globalThis.fetch = vi.fn(async (input, init) => {
       const url = new URL(String(input))
@@ -101,6 +105,7 @@ describe('Console authenticated streaming client', () => {
       sessionId: capabilityAccess.sessionId,
       expiresAt: Date.now() + 60_000,
       phase: 'session.create',
+      clientIp: '127.0.0.1',
     })).resolves.toMatchObject({ capability: capabilityAccess.capability, installsUsed: 1 })
   })
 
@@ -128,7 +133,40 @@ describe('Console authenticated streaming client', () => {
       sessionId: capabilityAccess.sessionId,
       expiresAt: Date.now() + 60_000,
       phase: 'session.create',
+      clientIp: '127.0.0.1',
     })).rejects.toThrow('线协议版本不兼容')
+  })
+
+  it('authenticates a reauthorization instruction before exposing it to the installer', async () => {
+    const responseBody = new TextEncoder().encode(JSON.stringify({
+      error: 'reauth_required',
+      riskDecision: { action: 'reauth', reason: 'authorization context changed',
+        messageId: 'M'.repeat(22), feedbackDeadlineAt: Date.now() + 30_000 },
+    }))
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const url = new URL(String(input))
+      const nonce = new Headers(init?.headers).get('x-azvf-nonce')!
+      const timestamp = String(Date.now())
+      const digest = createHash('sha256').update(responseBody).digest('hex')
+      const canonical = `${nonce}\n409\n${url.pathname}${url.search}\n${digest}\n${responseBody.length}\n${timestamp}`
+      return new Response(responseBody, { status: 409, headers: {
+        'x-azvf-json-sha256': digest,
+        'x-azvf-json-size': String(responseBody.length),
+        'x-azvf-json-timestamp': timestamp,
+        'x-azvf-json-signature': createHmac('sha256', signingKey()).update(canonical).digest('base64url'),
+      } })
+    }) as typeof fetch
+    const request = consumeEntitlement({
+      entitlementId: 'entitlement-1', authorization: 'signed.jwt.authorization.token.value',
+      resourceId: 'resource-1', deviceAddress: 'AA:BB:CC:DD:EE:FF',
+      consumptionId: 'unique-jti-123456', sessionId: capabilityAccess.sessionId,
+      expiresAt: Date.now() + 60_000, phase: 'session.create', clientIp: '127.0.0.1',
+    })
+    await expect(request).rejects.toMatchObject({
+      name: EntitlementDecisionError.name,
+      status: 409,
+      decision: { action: 'reauth', messageId: 'M'.repeat(22) },
+    })
   })
 
   it('reports only the bounded installation lifecycle fields over the signed channel', async () => {

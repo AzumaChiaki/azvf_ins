@@ -32,8 +32,12 @@ import { config } from './config.js'
 import { resourceConsumptionId } from './consumption.js'
 import {
   fetchPlaintextChunks,
+  fetchSiteContent,
   consumeEntitlement,
+  acknowledgeInstallationMessage,
+  EntitlementDecisionError,
   reportInstallationEvent,
+  reportInstallationSample,
   UpstreamHttpError,
   type InstallationTelemetryEvent,
   type AuthenticatedResourceMeta,
@@ -43,6 +47,7 @@ import { LeaseError, LeaseStore, type InstallEventType } from './leaseStore.js'
 import { RateLimiter } from './rateLimit.js'
 import { SessionStore, type InstallSession } from './session.js'
 import { createWatchfaceInstallTransform } from './watchfaceTransform.js'
+import { ByteRateGate, splitWireBytes } from './flowThrottle.js'
 
 interface SessionResponse extends SessionInitResponse {
   controlToken: string
@@ -62,6 +67,18 @@ const sessionBodySchema = {
     clientPublicKey: { type: 'string', minLength: 128, maxLength: 8_192, pattern: '^[A-Za-z0-9+/]+={0,2}$' },
     resourceId: { type: 'string', minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' },
     deviceAddr: { type: 'string', minLength: 8, maxLength: 64, pattern: DEVICE_IDENTIFIER_PATTERN },
+    clientAttributes: {
+      type: 'object', additionalProperties: false,
+      required: ['timeZone', 'language', 'screen', 'hardwareConcurrency', 'platform', 'engine'],
+      properties: {
+        timeZone: { type: 'string', minLength: 1, maxLength: 64 },
+        language: { type: 'string', minLength: 1, maxLength: 32 },
+        screen: { type: 'string', minLength: 5, maxLength: 24 },
+        hardwareConcurrency: { type: 'integer', minimum: 1, maximum: 1024 },
+        platform: { type: 'string', minLength: 1, maxLength: 64 },
+        engine: { type: 'string', enum: ['Chrome', 'Firefox', 'Safari', 'Edge', 'Other'] },
+      },
+    },
   },
 } as const
 
@@ -207,6 +224,24 @@ function leaseError(reply: FastifyReply, error: LeaseError) {
   return reply.code(status).send({ error: error.message, code: error.code, retryAfterSeconds: retryAfter })
 }
 
+async function acknowledgeDecision(sessionId: string, error: EntitlementDecisionError): Promise<void> {
+  if (!error.decision.messageId) return
+  await acknowledgeInstallationMessage({
+    sessionId,
+    messageId: error.decision.messageId,
+    action: error.decision.action === 'reauth' ? 'return-login' : 'acknowledge',
+  })
+}
+
+function decisionError(reply: FastifyReply, error: EntitlementDecisionError) {
+  if (error.decision.action === 'reauth') reply.header('x-azvf-reauth', config.redeemUrl)
+  if (error.decision.retryAfterSeconds) reply.header('retry-after', String(error.decision.retryAfterSeconds))
+  return reply.code(error.status).send({
+    error: error.decision.action === 'reauth' ? '需要重新核销' : error.decision.reason,
+    ...(error.decision.retryAfterSeconds ? { retryAfterSeconds: error.decision.retryAfterSeconds } : {}),
+  })
+}
+
 export async function installerRoutes(app: FastifyInstance) {
   const verifier = new AuthTokenVerifier(config)
   const leases = new LeaseStore(config.leaseDbPath, {
@@ -239,6 +274,17 @@ export async function installerRoutes(app: FastifyInstance) {
   app.addHook('onClose', async () => {
     sessions.close()
     leases.close()
+  })
+
+  app.get('/api/site-content', async (req, reply) => {
+    if (!checkRate(limiter, req, reply, 'site-content', 60)) return
+    try {
+      const content = await fetchSiteContent('install')
+      return reply.header('cache-control', 'public, max-age=300').send(content)
+    } catch (error) {
+      req.log.warn({ err: error }, 'site content unavailable')
+      return reply.code(503).send({ error: 'site_content_unavailable' })
+    }
   })
 
   app.post<{ Body: SessionInitRequest }>('/api/session', { schema: { body: sessionBodySchema } }, async (req, reply) => {
@@ -308,6 +354,8 @@ export async function installerRoutes(app: FastifyInstance) {
         sessionId,
         expiresAt: Math.min(expiresAt, leaseExpiresAt),
         phase: 'session.create',
+        clientIp: req.ip,
+        clientAttributes: req.body.clientAttributes,
       })
       const meta = await authenticateMeta(consumed.signedMeta, resourceId, verifier)
       const watchfaceTransform: WatchfaceInstallTransform | undefined = meta.resType === 16
@@ -346,6 +394,10 @@ export async function installerRoutes(app: FastifyInstance) {
         resourceCapability: consumed.capability,
         capabilityExpiresAt: consumed.capabilityExpiresAt,
         deviceAddress,
+        clientIp: req.ip,
+        clientAttributes: req.body.clientAttributes,
+        throttle: consumed.throttle,
+        lastHeartbeatAt: now,
         cryptoKeys,
         controlContext,
         frameSchedule,
@@ -383,6 +435,10 @@ export async function installerRoutes(app: FastifyInstance) {
         leases.cancelCreation(sessionId, consumptionId)
       }
       if (error instanceof LeaseError) return leaseError(reply, error)
+      if (error instanceof EntitlementDecisionError) {
+        await acknowledgeDecision(sessionId, error).catch((ackError) => req.log.warn({ err: ackError, sessionId }, 'decision acknowledgement failed'))
+        return decisionError(reply, error)
+      }
       if (error instanceof UpstreamHttpError) return reply.code(error.status).send({ error: error.message })
       req.log.error({ err: error }, 'session creation failed')
       return reply.code(502).send({ error: '无法安全建立安装会话' })
@@ -408,15 +464,23 @@ export async function installerRoutes(app: FastifyInstance) {
         sessionId: claimed.sessionId,
         expiresAt: boundedExpiry(claimed, config.installLeaseTtlSeconds),
         phase: 'stream.open',
+        clientIp: claimed.clientIp,
+        clientAttributes: claimed.clientAttributes,
       })
       const refreshedMeta = await authenticateMeta(refreshed.signedMeta, claimed.resourceId, verifier)
       if (refreshedMeta.manifestHash !== claimed.meta.manifestHash) throw new Error('资源版本已在会话期间变化')
       claimed.resourceCapability = refreshed.capability
       claimed.capabilityExpiresAt = refreshed.capabilityExpiresAt
+      claimed.throttle = refreshed.throttle
+      claimed.lastHeartbeatAt = Date.now()
     } catch (error) {
       req.log.warn({ err: error, sessionId: claimed.sessionId }, 'entitlement live-check rejected stream')
       sessions.remove(claimed.sessionId)
       leases.release(claimed.sessionId)
+      if (error instanceof EntitlementDecisionError) {
+        await acknowledgeDecision(claimed.sessionId, error).catch((ackError) => req.log.warn({ err: ackError }, 'decision acknowledgement failed'))
+        return decisionError(reply, error)
+      }
       return reply.code(410).send({ error: '授权已撤销、过期或不再可用' })
     }
     if (claimed.state !== 'authorizing') {
@@ -442,6 +506,45 @@ export async function installerRoutes(app: FastifyInstance) {
       let completed = false
       let realSeq = 0
       let lastRenewedAt = Date.now()
+      let sampleStartedAt = Date.now()
+      let sampleIndex = 0
+      let sampleBytes = 0
+      let sampleThrottleWaitMs = 0
+      let sampleBackpressureMs = 0
+      const throttle = new ByteRateGate(activeSession.throttle)
+      let sampleWindowMs = activeSession.throttle.mode === 'enforced'
+        ? Number(activeSession.throttle.sampleWindowMs) : 10_000
+      const piecesPerFrame = Math.max(1, Math.ceil(8 / activeSession.frameSchedule.length))
+      const flushSample = async (force = false) => {
+        const current = Date.now()
+        if (!force && current - sampleStartedAt < sampleWindowMs) return
+        if (sampleBytes === 0 && !force) return
+        try {
+          const decision = await reportInstallationSample({
+            sessionId: activeSession.sessionId,
+            resourceId: activeSession.resourceId,
+            deviceAddress: activeSession.deviceAddress,
+            region: trustedRegion(req),
+            sample: {
+              windowIndex: sampleIndex++,
+              backpressureMs: Math.min(600_000, Math.trunc(sampleBackpressureMs)),
+              throttleWaitMs: Math.min(600_000, Math.trunc(sampleThrottleWaitMs)),
+              bytesSent: sampleBytes,
+              heartbeatGapMs: activeSession.lastHeartbeatAt == null
+                ? -1 : Math.min(3_600_000, Math.max(0, current - activeSession.lastHeartbeatAt)),
+            },
+          })
+          if (decision.action !== 'allow') throw new EntitlementDecisionError(410, decision)
+        } catch (error) {
+          if (error instanceof EntitlementDecisionError) throw error
+          req.log.warn({ err: error, sessionId: activeSession.sessionId }, 'flow sample delivery failed')
+        } finally {
+          sampleStartedAt = current
+          sampleBytes = 0
+          sampleThrottleWaitMs = 0
+          sampleBackpressureMs = 0
+        }
+      }
       const source = fetchPlaintextChunks(activeSession.resourceId, activeSession.meta, {
         capability: activeSession.resourceCapability,
         sessionId: activeSession.sessionId,
@@ -482,15 +585,28 @@ export async function installerRoutes(app: FastifyInstance) {
               sessionId: activeSession.sessionId,
               expiresAt: boundedExpiry(activeSession, config.installLeaseTtlSeconds),
               phase: 'stream.renew',
+              clientIp: activeSession.clientIp,
+              clientAttributes: activeSession.clientAttributes,
             })
             activeSession.resourceCapability = refreshed.capability
             activeSession.capabilityExpiresAt = refreshed.capabilityExpiresAt
+            activeSession.throttle = refreshed.throttle
+            throttle.update(refreshed.throttle)
+            sampleWindowMs = refreshed.throttle.mode === 'enforced'
+              ? Number(refreshed.throttle.sampleWindowMs) : 10_000
             const renewedUntil = boundedExpiry(activeSession, config.installLeaseTtlSeconds)
             if (!leases.renew(activeSession.sessionId, renewedUntil)) throw new Error('安装租约续期失败')
             activeSession.expiresAt = renewedUntil
             lastRenewedAt = Date.now()
           }
-          yield Buffer.from(frame)
+          for (const wirePart of splitWireBytes(frame, piecesPerFrame)) {
+            sampleThrottleWaitMs += await throttle.wait(wirePart.length)
+            sampleBytes += wirePart.length
+            const yieldedAt = Date.now()
+            yield Buffer.from(wirePart)
+            sampleBackpressureMs += Math.max(0, Date.now() - yieldedAt)
+            await flushSample()
+          }
         }
         const finalPull = await pendingReal
         if (activeSession.state === 'cancelled') throw new Error('安装会话已取消')
@@ -498,6 +614,7 @@ export async function installerRoutes(app: FastifyInstance) {
         if (!finalPull.result?.done || realSeq !== activeSession.controlContext.realTotal) {
           throw new Error('资源流真实分片数量不一致')
         }
+        await flushSample(true)
         completed = true
       } finally {
         if (!completed) await source.return?.(undefined).catch(() => undefined)
@@ -558,13 +675,20 @@ export async function installerRoutes(app: FastifyInstance) {
         sessionId: session.sessionId,
         expiresAt: boundedExpiry(session as InstallSession, config.installLeaseTtlSeconds),
         phase: 'session.heartbeat',
+        clientIp: (session as InstallSession).clientIp,
+        clientAttributes: (session as InstallSession).clientAttributes,
       })
       ;(session as InstallSession).resourceCapability = refreshed.capability
       ;(session as InstallSession).capabilityExpiresAt = refreshed.capabilityExpiresAt
+      ;(session as InstallSession).throttle = refreshed.throttle
     } catch (error) {
       req.log.warn({ err: error, sessionId: session.sessionId }, 'entitlement live-check rejected heartbeat')
       sessions.remove(session.sessionId)
       leases.release(session.sessionId)
+      if (error instanceof EntitlementDecisionError) {
+        await acknowledgeDecision(session.sessionId, error).catch((ackError) => req.log.warn({ err: ackError }, 'decision acknowledgement failed'))
+        return decisionError(reply, error)
+      }
       return reply.code(410).send({ error: '授权已撤销、过期或不再可用' })
     }
     const expiresAt = boundedExpiry(session as InstallSession, config.installLeaseTtlSeconds)
@@ -574,6 +698,7 @@ export async function installerRoutes(app: FastifyInstance) {
       return reply.code(410).send({ error: '安装租约已到期' })
     }
     ;(session as InstallSession).expiresAt = expiresAt
+    ;(session as InstallSession).lastHeartbeatAt = Date.now()
     return reply.header('cache-control', 'no-store').send({ ok: true, leaseExpiresAt: expiresAt })
   })
 

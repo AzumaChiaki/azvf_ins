@@ -4,7 +4,7 @@ import { streamInstall, InstallCooldownError, type StreamProgress } from '../pip
 import { AmbientLayer } from '@azvf/ui'
 import { InstallFooter } from './InstallFooter.js'
 import { runtimeConfig } from '@azvf/ui/runtime-config'
-import { apiFetch, onBeforeReauth, ReauthRedirect } from '../apiFetch.js'
+import { apiFetch, onBeforeReauth, onReauthRequired, ReauthRedirect } from '../apiFetch.js'
 import {
   emptyAuthorization,
   formatPolicyRemaining,
@@ -109,6 +109,7 @@ export function InstallApp() {
   const disconnectTimesRef = useRef<number[]>([])
   const [cooldownUntil, setCooldownUntil] = useState(0)
   const [deviceHistory, setDeviceHistory] = useState<DeviceHistoryEntry[]>([])
+  const [reauthTarget, setReauthTarget] = useState('')
 
   useEffect(() => {
     const history = readDeviceHistory()
@@ -130,7 +131,8 @@ export function InstallApp() {
   // 跳回核销页前先优雅关闭串口：导航时强关在部分浏览器上会让标签页崩溃。
   useEffect(() => {
     onBeforeReauth(async () => { await sessionRef.current?.disconnect(false).catch(() => undefined) })
-    return () => onBeforeReauth(undefined)
+    onReauthRequired((target) => setReauthTarget(target))
+    return () => { onBeforeReauth(undefined); onReauthRequired(undefined) }
   }, [])
 
   useEffect(() => {
@@ -381,6 +383,7 @@ export function InstallApp() {
       notify('✅ 安装完成')
       setCooldownUntil(0)
     } catch (error) {
+      if (error instanceof ReauthRedirect) return
       if (error instanceof InstallCooldownError) {
         setCooldownUntil(Date.now() + error.retryAfterSeconds * 1_000)
         notify(`⏳ ${error.message}`)
@@ -589,6 +592,17 @@ export function InstallApp() {
               </ul>
             )}
             {deviceHistory.length > 0 && <button type="button" className="link-button" onClick={clearDeviceHistory}>清空全部已保存设备</button>}
+          </div>
+        </div>
+      )}
+      {reauthTarget && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="需要重新核销">
+          <div className="modal-card">
+            <div className="modal-head"><h3>需要重新核销</h3></div>
+            <p className="modal-intro">当前安装授权已失效或运行环境发生变化。设备连接已安全关闭，请返回核销页重新验证后再继续。</p>
+            <div className="form-row">
+              <button type="button" onClick={() => { window.location.href = reauthTarget }}>返回核销页</button>
+            </div>
           </div>
         </div>
       )}

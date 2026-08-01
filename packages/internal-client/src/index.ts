@@ -36,6 +36,22 @@ export class UpstreamHttpError extends Error {
   }
 }
 
+export interface AuthorizationDecision {
+  action: 'allow' | 'reauth' | 'terminate'
+  reason: string
+  contact?: string
+  messageId?: string
+  feedbackDeadlineAt?: number
+  retryAfterSeconds?: number
+}
+
+export class EntitlementDecisionError extends UpstreamHttpError {
+  constructor(status: number, readonly decision: AuthorizationDecision) {
+    super(status, decision.reason)
+    this.name = 'EntitlementDecisionError'
+  }
+}
+
 export type AuthenticatedResourceMeta = SignedResourceMeta
 
 interface SignedRequest {
@@ -208,6 +224,18 @@ export async function fetchMeta(
     throw new Error('Console 资源元数据响应无效')
   }
   return meta
+}
+
+export async function fetchSiteContent(page: 'redeem' | 'install'): Promise<unknown> {
+  const url = internalUrl(`internal/site-content?page=${page}`)
+  const { response, signed } = await signedFetch('GET', url)
+  const body = await readBytesLimited(response, 65_536)
+  verifyJsonResponse(response, signed, body)
+  if (!response.ok) throw new UpstreamHttpError(upstreamStatus(response.status), '动态页脚获取失败')
+  const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)) as unknown
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object'
+    || !Array.isArray((parsed as Record<string, unknown>).sections)) throw new Error('Console 动态页脚响应无效')
+  return parsed
 }
 
 function verifyMetaResponse(response: Response, signed: SignedRequest, body: Uint8Array): void {
@@ -390,6 +418,14 @@ const INSTALLATION_EVENTS: ReadonlySet<string> = new Set<InstallationTelemetryEv
   'install.failed',
 ])
 
+export interface InstallationSample {
+  windowIndex: number
+  backpressureMs: number
+  throttleWaitMs: number
+  bytesSent: number
+  heartbeatGapMs: number
+}
+
 /** Sends minimal, signed lifecycle telemetry. No client IP or error detail is included. */
 export async function reportInstallationEvent(input: {
   sessionId: string
@@ -421,6 +457,60 @@ export async function reportInstallationEvent(input: {
   if (!parsed || parsed.ok !== true) throw new Error('Console 安装遥测响应无效')
 }
 
+export async function reportInstallationSample(input: {
+  sessionId: string
+  resourceId: string
+  deviceAddress: string
+  region: string
+  sample: InstallationSample
+}): Promise<AuthorizationDecision> {
+  if (!/^[A-Za-z0-9_-]{32,64}$/.test(input.sessionId)
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(input.resourceId)
+    || !/^[A-Za-z0-9+/=_:-]{8,64}$/.test(input.deviceAddress)
+    || (input.region !== 'UNKNOWN' && !/^[A-Z0-9][A-Z0-9-]{0,6}[A-Z0-9]$/.test(input.region))
+    || !Number.isSafeInteger(input.sample.windowIndex) || input.sample.windowIndex < 0
+    || !Number.isSafeInteger(input.sample.backpressureMs) || input.sample.backpressureMs < 0 || input.sample.backpressureMs > 600_000
+    || !Number.isSafeInteger(input.sample.throttleWaitMs) || input.sample.throttleWaitMs < 0 || input.sample.throttleWaitMs > 600_000
+    || !Number.isSafeInteger(input.sample.bytesSent) || input.sample.bytesSent < 0 || input.sample.bytesSent > 2 ** 40
+    || !Number.isSafeInteger(input.sample.heartbeatGapMs) || input.sample.heartbeatGapMs < -1 || input.sample.heartbeatGapMs > 3_600_000) {
+    throw new Error('安装采样字段无效')
+  }
+  const url = internalUrl('internal/installations/events')
+  const body = new TextEncoder().encode(JSON.stringify({
+    sessionId: input.sessionId,
+    resourceId: input.resourceId,
+    deviceAddr: input.deviceAddress,
+    event: 'install.sampled',
+    region: input.region,
+    sample: input.sample,
+  }))
+  const { response, signed } = await signedFetch('POST', url, body, { 'content-type': 'application/json' })
+  const responseBody = await readBytesLimited(response, 16_384)
+  verifyJsonResponse(response, signed, responseBody)
+  if (!response.ok) throw new UpstreamHttpError(upstreamStatus(response.status), '安装采样上报失败')
+  const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(responseBody)) as Record<string, unknown>
+  if (!parsed || parsed.ok !== true) throw new Error('Console 安装采样响应无效')
+  return parseDecision(parsed.riskDecision, false)
+}
+
+export async function acknowledgeInstallationMessage(input: {
+  sessionId: string
+  messageId: string
+  action: 'acknowledge' | 'return-login'
+}): Promise<void> {
+  if (!/^[A-Za-z0-9_-]{32,64}$/.test(input.sessionId) || !/^[A-Za-z0-9_-]{22,64}$/.test(input.messageId)) {
+    throw new Error('安装消息回执字段无效')
+  }
+  const url = internalUrl(`internal/installations/messages/${encodeURIComponent(input.messageId)}/ack`)
+  const body = new TextEncoder().encode(JSON.stringify({ sessionId: input.sessionId, action: input.action }))
+  const { response, signed } = await signedFetch('POST', url, body, { 'content-type': 'application/json' })
+  const responseBody = await readBytesLimited(response, 8_192)
+  verifyJsonResponse(response, signed, responseBody)
+  if (!response.ok) throw new UpstreamHttpError(upstreamStatus(response.status), '安装消息回执失败')
+  const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(responseBody)) as Record<string, unknown>
+  if (!parsed || parsed.ok !== true || typeof parsed.late !== 'boolean') throw new Error('Console 安装消息回执响应无效')
+}
+
 export type EntitlementConsumePhase =
   | 'session.create'
   | 'stream.open'
@@ -434,6 +524,36 @@ export interface EntitlementConsumption {
   idempotent: boolean
   installsUsed: number
   maxInstalls?: number
+  throttle: {
+    mode: 'enforced' | 'disabled'
+    sessionId: string
+    ratePerSecond?: number
+    burstBytes?: number
+    sampleWindowMs?: number
+  }
+  decision: AuthorizationDecision
+}
+
+function parseDecision(value: unknown, requireAllow: boolean): AuthorizationDecision {
+  if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('Console 会话处置响应无效')
+  const input = value as Record<string, unknown>
+  if (!['allow', 'reauth', 'terminate'].includes(String(input.action))
+    || (requireAllow && input.action !== 'allow')
+    || typeof input.reason !== 'string' || input.reason.length < 1 || input.reason.length > 500
+    || (input.contact !== undefined && (typeof input.contact !== 'string' || input.contact.length > 500))
+    || (input.messageId !== undefined && (typeof input.messageId !== 'string' || !/^[A-Za-z0-9_-]{22,64}$/.test(input.messageId)))
+    || (input.feedbackDeadlineAt !== undefined && (!Number.isSafeInteger(input.feedbackDeadlineAt) || Number(input.feedbackDeadlineAt) <= 0))
+    || (input.retryAfterSeconds !== undefined && (!Number.isSafeInteger(input.retryAfterSeconds) || Number(input.retryAfterSeconds) < 1))) {
+    throw new Error('Console 会话处置响应无效')
+  }
+  return {
+    action: input.action as AuthorizationDecision['action'],
+    reason: input.reason,
+    ...(typeof input.contact === 'string' ? { contact: input.contact } : {}),
+    ...(typeof input.messageId === 'string' ? { messageId: input.messageId } : {}),
+    ...(Number.isSafeInteger(input.feedbackDeadlineAt) ? { feedbackDeadlineAt: Number(input.feedbackDeadlineAt) } : {}),
+    ...(Number.isSafeInteger(input.retryAfterSeconds) ? { retryAfterSeconds: Number(input.retryAfterSeconds) } : {}),
+  }
 }
 
 export async function consumeEntitlement(input: {
@@ -445,6 +565,8 @@ export async function consumeEntitlement(input: {
   sessionId: string
   expiresAt: number
   phase: EntitlementConsumePhase
+  clientIp: string
+  clientAttributes?: unknown
 }): Promise<EntitlementConsumption> {
   const url = internalUrl(`internal/entitlements/${encodeURIComponent(input.entitlementId)}/consume`)
   const body = new TextEncoder().encode(JSON.stringify({
@@ -455,12 +577,17 @@ export async function consumeEntitlement(input: {
     sessionId: input.sessionId,
     expiresAt: input.expiresAt,
     phase: input.phase,
+    clientIp: input.clientIp,
+    ...(input.clientAttributes === undefined ? {} : { clientAttributes: input.clientAttributes }),
   }))
   const { response, signed } = await signedFetch('POST', url, body, { 'content-type': 'application/json' })
-  if (!response.ok) throw new UpstreamHttpError(upstreamStatus(response.status), '授权安装额度核销失败')
   const responseBody = await readBytesLimited(response)
   verifyJsonResponse(response, signed, responseBody)
   const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(responseBody)) as Record<string, unknown>
+  if (!response.ok) {
+    if (parsed?.riskDecision) throw new EntitlementDecisionError(response.status, parseDecision(parsed.riskDecision, false))
+    throw new UpstreamHttpError(upstreamStatus(response.status), '授权安装额度核销失败')
+  }
   if (!parsed || parsed.ok !== true) throw new Error('Console 安装额度核销响应无效')
   if (parsed.wireProtocolVersion !== WIRE_PROTOCOL_VERSION) {
     throw new Error(`Console 线协议版本不兼容：期望 ${WIRE_PROTOCOL_VERSION}，实际 ${String(parsed.wireProtocolVersion)}`)
@@ -470,15 +597,35 @@ export async function consumeEntitlement(input: {
     || !parsed.signedMeta || typeof parsed.signedMeta !== 'object'
     || typeof (parsed.signedMeta as Record<string, unknown>).id !== 'string'
     || !Number.isSafeInteger(parsed.installsUsed) || Number(parsed.installsUsed) < 0
-    || typeof parsed.idempotent !== 'boolean') {
+    || typeof parsed.idempotent !== 'boolean'
+    || !parsed.throttle || typeof parsed.throttle !== 'object') {
     throw new Error('Console capability 核销响应无效')
   }
+  const throttle = parsed.throttle as Record<string, unknown>
+  if (!['enforced', 'disabled'].includes(String(throttle.mode)) || throttle.sessionId !== input.sessionId
+    || (throttle.mode === 'enforced' && (!Number.isSafeInteger(throttle.ratePerSecond)
+      || Number(throttle.ratePerSecond) < 1024 || Number(throttle.ratePerSecond) > 100 * 1024 * 1024
+      || !Number.isSafeInteger(throttle.burstBytes) || Number(throttle.burstBytes) < 1024
+      || Number(throttle.burstBytes) > 64 * 1024 * 1024
+      || !Number.isSafeInteger(throttle.sampleWindowMs) || Number(throttle.sampleWindowMs) < 1000
+      || Number(throttle.sampleWindowMs) > 300_000))) throw new Error('Console 输出控制响应无效')
+  const decision = parseDecision(parsed.riskDecision, true)
   return {
     capability: parsed.capability,
     capabilityExpiresAt: Number(parsed.capabilityExpiresAt),
     signedMeta: parsed.signedMeta as unknown as AuthenticatedResourceMeta,
     idempotent: parsed.idempotent,
     installsUsed: Number(parsed.installsUsed),
+    throttle: {
+      mode: throttle.mode as 'enforced' | 'disabled',
+      sessionId: String(throttle.sessionId),
+      ...(throttle.mode === 'enforced' ? {
+        ratePerSecond: Number(throttle.ratePerSecond),
+        burstBytes: Number(throttle.burstBytes),
+        sampleWindowMs: Number(throttle.sampleWindowMs),
+      } : {}),
+    },
+    decision,
     ...(Number.isSafeInteger(parsed.maxInstalls) ? { maxInstalls: Number(parsed.maxInstalls) } : {}),
   }
 }
