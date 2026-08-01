@@ -325,6 +325,8 @@ export async function buildServer(): Promise<FastifyInstance> {
         idempotent: false,
         installsUsed: 1,
         maxInstalls: 1,
+        throttle: { mode: 'disabled', sessionId: request.body.sessionId },
+        riskDecision: { action: 'allow', reason: 'reference authorizer allowed the session' },
       })
     } catch {
       return sendSignedJson(request as AuthenticatedRequest, reply, 403, {
@@ -387,7 +389,14 @@ export async function buildServer(): Promise<FastifyInstance> {
   })
 
   app.post('/internal/installations/events', { preHandler: requireInternal }, async (request, reply) => {
-    return sendSignedJson(request as AuthenticatedRequest, reply, 200, { ok: true })
+    return sendSignedJson(request as AuthenticatedRequest, reply, 200, {
+      ok: true,
+      riskDecision: { action: 'allow', reason: 'reference authorizer accepted the sample' },
+    })
+  })
+
+  app.get('/internal/site-content', { preHandler: requireInternal }, async (request, reply) => {
+    return sendSignedJson(request as AuthenticatedRequest, reply, 200, { page: 'install', sections: [] })
   })
 
   return app
