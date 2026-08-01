@@ -193,6 +193,10 @@ export function InstallApp() {
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const parsed = parseAuthorizationResponse(await response.json())
+      if (Object.keys(parsed.resourceTokens).length === 0 || parsed.resources.length === 0) {
+        window.location.replace('https://install.azki.ai')
+        return
+      }
       if (authorizationRequestRef.current === requestId) setAuthorization(parsed)
     } catch (error) {
       // 页面正在跳回核销页，不要再覆盖状态或弹错误。
