@@ -4,7 +4,7 @@
   "token": {
     "defaultIssuer": "azvf-console",
     "defaultAudience": "azvf-installer",
-    "supportedClientContextVersion": 1,
+    "supportedClientContextVersion": 2,
     "clientContextCases": {
       "missing": 0,
       "low": 0,

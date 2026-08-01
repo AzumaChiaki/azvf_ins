@@ -17,7 +17,7 @@ export interface InstallSession {
   capabilityExpiresAt: number
   deviceAddress: string
   clientIp: string
-  clientAttributes?: unknown
+  clientAttributes: NonNullable<import('@azvf/contract').SessionInitRequest['clientAttributes']>
   throttle: {
     mode: 'enforced' | 'disabled'
     sessionId: string

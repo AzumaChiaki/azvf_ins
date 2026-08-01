@@ -98,7 +98,7 @@ export interface SessionInitRequest {
   /** 规范化前的目标设备 MAC；服务端必须规范化并严格匹配授权绑定。 */
   deviceAddr: string
   /** 用户同意后采集的低熵运行环境属性；服务端只负责原样转交授权服务。 */
-  clientAttributes?: {
+  clientAttributes: {
     timeZone: string
     language: string
     screen: string
@@ -153,7 +153,7 @@ export const DEFAULT_TOKEN_AUDIENCE = 'azvf-installer'
 export const WIRE_PROTOCOL_VERSION = 3
 
 /** 已冻结的新同意协议版本；在生产激活前可以存在于代码中但不得自动抬高数据库 minimum。 */
-export const SUPPORTED_CLIENT_CONTEXT_VERSION = 1
+export const SUPPORTED_CLIENT_CONTEXT_VERSION = 2
 
 /** @deprecated 服务端应从运行配置读取；仅保留为默认值兼容旧调用方。 */
 export const TOKEN_ISSUER = DEFAULT_TOKEN_ISSUER

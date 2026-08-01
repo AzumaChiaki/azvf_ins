@@ -76,7 +76,7 @@ it('issues a current token and protects capability/meta/plaintext with signed in
     issuer: 'reference-test',
     audience: 'azvf-installer',
   })
-  assert.equal(verified.payload.clientContextVersion, 1)
+  assert.equal(verified.payload.clientContextVersion, 2)
 
   const sessionId = 'session_1234567890abcdefghijklmnop'
   const consumePath = '/internal/entitlements/reference-entitlement/consume'

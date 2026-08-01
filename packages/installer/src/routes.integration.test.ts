@@ -28,6 +28,10 @@ import {
 const originalFetch = globalThis.fetch
 const internalSecret = 'installer-console-test-signing-secret'
 const internalKey = createHash('sha256').update(internalSecret).digest()
+const clientAttributes = {
+  timeZone: 'Asia/Shanghai', language: 'zh-CN', screen: '1920x1080x24',
+  hardwareConcurrency: 8, platform: 'MacIntel', engine: 'Chrome' as const,
+}
 
 afterEach(() => {
   globalThis.fetch = originalFetch
@@ -245,7 +249,7 @@ describe('Installer authenticated v3 route', () => {
     const now = Math.floor(Date.now() / 1_000)
     const authToken = await new SignJWT({
       grant: 'cardkey', sku: 'sku', resourceIds: [meta.id], entitlementId: 'entitlement-integration',
-      deviceAddr: 'AA:BB:CC:DD:EE:FF', tier: 'basic', installConcurrency: 1, clientContextVersion: 1,
+      deviceAddr: 'AA:BB:CC:DD:EE:FF', tier: 'basic', installConcurrency: 1, clientContextVersion: 2,
     })
       .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: 'integration-key' })
       .setIssuer(TOKEN_ISSUER)
@@ -257,7 +261,7 @@ describe('Installer authenticated v3 route', () => {
       .sign(signingKeys.privateKey)
     const secondOrderToken = await new SignJWT({
       grant: 'afdian-order', sku: 'sku-2', resourceIds: ['resource-other'], entitlementId: 'entitlement-other',
-      deviceAddr: 'AA:BB:CC:DD:EE:FF', tier: 'premium', installConcurrency: 4, clientContextVersion: 1,
+      deviceAddr: 'AA:BB:CC:DD:EE:FF', tier: 'premium', installConcurrency: 4, clientContextVersion: 2,
     })
       .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: 'integration-key' })
       .setIssuer(TOKEN_ISSUER)
@@ -303,10 +307,18 @@ describe('Installer authenticated v3 route', () => {
       expect(commercialBoundary.statusCode).toBe(404)
       expect(commercialBoundary.headers['set-cookie']).toBeUndefined()
 
-      const init = await app.inject({
+      const missingClientContext = await app.inject({
         method: 'POST',
         url: '/api/session',
         payload: { authToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'aa-bb-cc-dd-ee-ff' },
+      })
+      expect(missingClientContext.statusCode).toBe(400)
+      expect(consumed).toBe(0)
+
+      const init = await app.inject({
+        method: 'POST',
+        url: '/api/session',
+        payload: { authToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'aa-bb-cc-dd-ee-ff', clientAttributes },
       })
       expect(init.statusCode, init.body).toBe(200)
       const session = init.json() as SessionInitResponse
@@ -327,7 +339,7 @@ describe('Installer authenticated v3 route', () => {
 
       const secondToken = await new SignJWT({
         grant: 'cardkey', sku: 'sku', resourceIds: [meta.id], entitlementId: 'entitlement-integration',
-        deviceAddr: 'AA:BB:CC:DD:EE:FE', tier: 'basic', installConcurrency: 1, clientContextVersion: 1,
+        deviceAddr: 'AA:BB:CC:DD:EE:FE', tier: 'basic', installConcurrency: 1, clientContextVersion: 2,
       })
         .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: 'integration-key' })
         .setIssuer(TOKEN_ISSUER)
@@ -340,7 +352,7 @@ describe('Installer authenticated v3 route', () => {
       const concurrencyRejected = await app.inject({
         method: 'POST',
         url: '/api/session',
-        payload: { authToken: secondToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FE' },
+        payload: { authToken: secondToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FE', clientAttributes },
       })
       expect(concurrencyRejected.statusCode).toBe(429)
       expect(consumed).toBe(1) // A rejected local lease must never charge a remote install attempt.
@@ -429,7 +441,7 @@ describe('Installer authenticated v3 route', () => {
       const tokenReplay = await app.inject({
         method: 'POST',
         url: '/api/session',
-        payload: { authToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FF' },
+        payload: { authToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FF', clientAttributes },
       })
       expect(tokenReplay.statusCode).toBe(409)
       // One initial quota consume plus a capability refresh before each stream.

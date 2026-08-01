@@ -61,7 +61,7 @@ interface EventBody { event: InstallEventType; detail?: string; attempt?: number
 const sessionBodySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['authToken', 'clientPublicKey', 'resourceId', 'deviceAddr'],
+  required: ['authToken', 'clientPublicKey', 'resourceId', 'deviceAddr', 'clientAttributes'],
   properties: {
     authToken: { type: 'string', minLength: 32, maxLength: 16_384 },
     clientPublicKey: { type: 'string', minLength: 128, maxLength: 8_192, pattern: '^[A-Za-z0-9+/]+={0,2}$' },

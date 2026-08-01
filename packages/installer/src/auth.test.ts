@@ -15,7 +15,7 @@ describe('AuthTokenVerifier', () => {
     // 安装器对未知 claims 一律放行——签发方可以自由附带，安装器不读也不校验。
     const token = await new SignJWT({
       grant: 'cardkey', sku: 'test', resourceIds: ['resource'], entitlementId: 'entitlement', tier: 'premium',
-      installConcurrency: 4, clientContextVersion: 1,
+      installConcurrency: 4, clientContextVersion: 2,
     })
       .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: 'test-key' })
       .setIssuer(TOKEN_ISSUER)
@@ -39,7 +39,7 @@ describe('AuthTokenVerifier', () => {
 
     const missingConcurrency = await new SignJWT({
       grant: 'cardkey', sku: 'test', resourceIds: ['resource'], entitlementId: 'entitlement', tier: 'premium',
-      clientContextVersion: 1,
+      clientContextVersion: 2,
     })
       .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: 'test-key' })
       .setIssuer(TOKEN_ISSUER).setAudience(TOKEN_AUDIENCE).setSubject('user')
@@ -48,7 +48,7 @@ describe('AuthTokenVerifier', () => {
 
     const validClaims = {
       resourceIds: ['resource-a'], entitlementId: 'entitlement',
-      tier: 'basic', installConcurrency: 1, clientContextVersion: 1,
+      tier: 'basic', installConcurrency: 1, clientContextVersion: 2,
     }
     const malformed: Array<{ claims: Record<string, unknown>; message: string }> = [
       { claims: { ...validClaims, resourceIds: ['resource-a', 'resource-a'] }, message: '不允许重复' },
@@ -81,7 +81,8 @@ describe('AuthTokenVerifier', () => {
     for (const [version, code] of [
       [undefined, 'authorization_version_outdated'],
       [0, 'authorization_version_outdated'],
-      [2, 'authorization_client_upgrade_required'],
+      [1, 'authorization_version_outdated'],
+      [3, 'authorization_client_upgrade_required'],
     ] as const) {
       await expect(verifier.verify(await token(version))).rejects.toMatchObject({
         name: AuthorizationVersionError.name,
@@ -104,7 +105,7 @@ describe('AuthTokenVerifier', () => {
       const now = Math.floor(Date.now() / 1_000)
       const token = await new SignJWT({
         resourceIds: ['resource'], entitlementId: 'entitlement', tier: 'basic', installConcurrency: 1,
-        clientContextVersion: 1,
+        clientContextVersion: 2,
       })
         .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: 'custom-key' })
         .setIssuer('custom-console')
@@ -118,7 +119,7 @@ describe('AuthTokenVerifier', () => {
 
       const wrongAudience = await new SignJWT({
         resourceIds: ['resource'], entitlementId: 'entitlement', tier: 'basic', installConcurrency: 1,
-        clientContextVersion: 1,
+        clientContextVersion: 2,
       })
         .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: 'custom-key' })
         .setIssuer('custom-console')
