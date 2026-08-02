@@ -4,6 +4,7 @@ import {
   mergeAuthorizations,
   parseAuthorizationResponse,
   sanitizeDeviceHistory,
+  selectAuthorizedResource,
 } from './authorization.js'
 
 const tokenA = `aaa.${'b'.repeat(40)}.ccc`
@@ -46,6 +47,21 @@ describe('Installer browser authorization boundary', () => {
     expect(parseAuthorizationResponse({ ...base, selectedResourceId: 'resource_three' }).selectedResourceId)
       .toBeUndefined()
     expect(parseAuthorizationResponse(base).selectedResourceId).toBeUndefined()
+  })
+
+  it('lets a newer redeem-page selection replace an older still-authorized install-page selection', () => {
+    const base = {
+      resourceTokens: { resource_one: tokenA, resource_two: tokenB },
+      resources: [
+        { id: 'resource_one', name: '资源一', version: '1.0', resType: 16, size: 1024 },
+        { id: 'resource_two', name: '资源二', version: '2.0', resType: 64, size: 2048 },
+      ],
+      policies: [],
+    }
+
+    const newlySelected = parseAuthorizationResponse({ ...base, selectedResourceId: 'resource_two' })
+    expect(selectAuthorizedResource('resource_one', newlySelected)).toBe('resource_two')
+    expect(selectAuthorizedResource('resource_two', parseAuthorizationResponse(base))).toBe('resource_two')
   })
 
   it('rejects a policy resource that has no authenticated token mapping', () => {

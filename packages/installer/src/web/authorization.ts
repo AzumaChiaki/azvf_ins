@@ -143,6 +143,22 @@ export function mergeAuthorizations(...authorizations: BrowserAuthorization[]): 
   }
 }
 
+/**
+ * Reconcile the resource picker after a live authorization refresh.
+ *
+ * A selection made on the redeem page is an explicit, newer intent and must
+ * win even when the install page already has another still-authorized resource
+ * selected (for example after browser back/forward cache restores the page).
+ * Without a redeem-page preference, preserve the user's current install-page
+ * selection and only then fall back to the first authorized resource.
+ */
+export function selectAuthorizedResource(current: string, authorization: BrowserAuthorization): string {
+  const preferred = authorization.selectedResourceId
+  if (preferred && authorization.resourceTokens[preferred] !== undefined) return preferred
+  if (current && authorization.resourceTokens[current] !== undefined) return current
+  return authorization.resources[0]?.id ?? ''
+}
+
 /** Re-validates every stored field on each load; drops anything malformed instead of trusting prior writes. */
 export function sanitizeDeviceHistory(raw: unknown): DeviceHistoryEntry[] {
   if (!Array.isArray(raw)) return []

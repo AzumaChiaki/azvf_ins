@@ -10,6 +10,7 @@ import {
   formatPolicyRemaining,
   parseAuthorizationResponse,
   sanitizeDeviceHistory,
+  selectAuthorizedResource,
   type BrowserAuthorization,
   type DeviceHistoryEntry,
 } from '../authorization.js'
@@ -150,10 +151,7 @@ export function InstallApp() {
   }
 
   useEffect(() => {
-    setResourceId((current) => authorization.resourceTokens[current]
-      ? current
-      // 核销页选定的资源优先，其次退回第一项。
-      : (authorization.selectedResourceId ?? authorization.resources[0]?.id ?? ''))
+    setResourceId((current) => selectAuthorizedResource(current, authorization))
   }, [authorization])
 
   useEffect(() => {
