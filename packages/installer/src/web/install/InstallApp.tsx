@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { MiWearSession, requestSerialPort } from '../miwear/session.js'
 import { streamInstall, InstallCooldownError, type StreamProgress } from '../pipeline.js'
 import { AmbientLayer } from '@azvf/ui'
@@ -129,11 +129,25 @@ export function InstallApp() {
   }, [])
 
   // 跳回核销页前先优雅关闭串口：导航时强关在部分浏览器上会让标签页崩溃。
+  const closeDeviceSession = () => sessionRef.current?.disconnect(false).catch(() => undefined) ?? Promise.resolve()
+
   useEffect(() => {
-    onBeforeReauth(async () => { await sessionRef.current?.disconnect(false).catch(() => undefined) })
+    onBeforeReauth(closeDeviceSession)
     onReauthRequired((target) => setReauthTarget(target))
     return () => { onBeforeReauth(undefined); onReauthRequired(undefined) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // "返回核销页"是页头常驻链接，设备连接甚至安装进行中都可以点——原生 <a> 导航
+  // 会绕开上面这条清理路径，触发同一个"导航时强关串口"崩溃。左键无修饰键的点击
+  // 一律先走优雅关闭，再手动导航；中键/Ctrl/Cmd 点击（新标签页打开）不受影响，
+  // 因为当前标签页并未离开、串口也不会被撕掉。
+  const returnToRedeem = async (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    event.preventDefault()
+    await closeDeviceSession()
+    window.location.href = runtimeConfig.redeemUrl
+  }
 
   useEffect(() => {
     setResourceId((current) => authorization.resourceTokens[current]
@@ -155,7 +169,7 @@ export function InstallApp() {
 
   const notify = (m: string) => {
     setStatus(m)
-    if (/失败|错误|无效|未通过|拒绝|断开|过期|异常|❌/i.test(m)) setErrorBanner(m)
+    if (/失败|错误|无效|未通过|拒绝|断开|过期|异常/i.test(m)) setErrorBanner(m)
     debug(m)
   }
 
@@ -384,15 +398,15 @@ export function InstallApp() {
         },
         { onLog: debug, onProgress: setProg },
       )
-      notify('✅ 安装完成')
+      notify('安装完成')
       setCooldownUntil(0)
     } catch (error) {
       if (error instanceof ReauthRedirect) return
       if (error instanceof InstallCooldownError) {
         setCooldownUntil(Date.now() + error.retryAfterSeconds * 1_000)
-        notify(`⏳ ${error.message}`)
+        notify(error.message)
       } else {
-        notify(`❌ 安装失败：${error instanceof Error ? error.message : String(error)}`)
+        notify(`安装失败：${error instanceof Error ? error.message : String(error)}`)
       }
       if (serial) await refreshDeviceAuthorization(serial).catch(() => undefined)
     } finally {
@@ -430,7 +444,7 @@ export function InstallApp() {
             <h1>资源安装器</h1>
           </div>
           <div className="site-banner-actions">
-            <a className="site-banner-link" href={runtimeConfig.redeemUrl}>返回核销页</a>
+            <a className="site-banner-link" href={runtimeConfig.redeemUrl} onClick={(event) => void returnToRedeem(event)}>返回核销页</a>
           </div>
         </div>
       </header>
