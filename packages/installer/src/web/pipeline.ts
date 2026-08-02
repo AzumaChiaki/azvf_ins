@@ -306,7 +306,7 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
     try {
       await sendControl(session, 'event', { event, detail, attempt, acknowledgedPart })
     } catch (error) {
-      log(`⚠️ 安装事件记录失败: ${errorMessage(error)}`)
+      log(`安装事件记录失败: ${errorMessage(error)}`)
     }
   }
 
@@ -486,12 +486,12 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
         heartbeatFailures++
         const failure = new Error(`安装租约续期失败: HTTP ${result.status}`)
         if (result.status === 404 || result.status === 410 || heartbeatFailures >= 3) activeFail?.(failure)
-        else log(`⚠️ ${failure.message}，将在后台重试（${heartbeatFailures}/3）`)
+        else log(`${failure.message}，将在后台重试（${heartbeatFailures}/3）`)
       }).catch((error) => {
         heartbeatFailures++
         const failure = new Error(`安装租约续期失败: ${errorMessage(error)}`)
         if (heartbeatFailures >= 3) activeFail?.(failure)
-        else log(`⚠️ ${failure.message}，将在后台重试（${heartbeatFailures}/3）`)
+        else log(`${failure.message}，将在后台重试（${heartbeatFailures}/3）`)
       }).finally(() => {
         heartbeatRunning = false
       })
@@ -531,7 +531,7 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
     }
     success = true
     completed = true
-    log('✅ 认证流式安装完成')
+    log('认证流式安装完成')
     return meta
   } catch (error) {
     completionDetail = completionDetail ?? errorMessage(error)
@@ -546,9 +546,9 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
         attempt,
         acknowledgedPart,
       })
-      if (!completion.ok) log(`⚠️ 安装租约释放返回 HTTP ${completion.status}`)
+      if (!completion.ok) log(`安装租约释放返回 HTTP ${completion.status}`)
     } catch (error) {
-      log(`⚠️ 安装租约释放失败: ${errorMessage(error)}`)
+      log(`安装租约释放失败: ${errorMessage(error)}`)
     }
   }
 }
