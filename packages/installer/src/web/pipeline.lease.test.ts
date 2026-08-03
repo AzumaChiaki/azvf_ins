@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest'
-import { hasValidLeaseWindow } from './pipeline.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createInstallationSession, hasValidLeaseWindow } from './pipeline.js'
+
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+  vi.restoreAllMocks()
+})
 
 describe('installer lease window validation', () => {
   const serverEpoch = 1_800_000_000
@@ -13,5 +20,33 @@ describe('installer lease window validation', () => {
     expect(hasValidLeaseWindow(serverEpoch * 1_000, serverEpoch)).toBe(false)
     expect(hasValidLeaseWindow(serverEpoch * 1_000 + 3_602_000, serverEpoch)).toBe(false)
     expect(hasValidLeaseWindow('invalid', serverEpoch)).toBe(false)
+  })
+})
+
+describe('installer session initialization retry', () => {
+  it('reuses the exact idempotency request after a transient proxy response', async () => {
+    const bodies: string[] = []
+    globalThis.fetch = vi.fn(async (_input, init) => {
+      bodies.push(String(init?.body))
+      return bodies.length === 1
+        ? new Response(JSON.stringify({ error: 'bad gateway' }), { status: 502 })
+        : new Response(JSON.stringify({ sessionId: 'recovered' }), { status: 200 })
+    }) as typeof fetch
+    const request = {
+      attemptId: 'browser_attempt_1234567890abcdefghijklmnop',
+      authToken: 'authorization-token',
+      clientPublicKey: 'public-key',
+      resourceId: 'resource-1',
+      deviceAddr: 'AA:BB:CC:DD:EE:FF',
+      clientAttributes: {
+        timeZone: 'Asia/Shanghai', language: 'zh-CN', screen: '1920x1080x24',
+        hardwareConcurrency: 8, platform: 'MacIntel', engine: 'Chrome' as const,
+      },
+    }
+
+    const response = await createInstallationSession(request)
+    expect(response.status).toBe(200)
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toBe(bodies[0])
   })
 })

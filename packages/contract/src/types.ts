@@ -90,6 +90,8 @@ export interface SessionInitResponse {
 
 /** 浏览器发起安装会话的请求 */
 export interface SessionInitRequest {
+  /** Browser-generated idempotency key reused only while retrying this exact key exchange. */
+  attemptId: string
   /** console 签发的授权令牌 (JWT) */
   authToken: string
   /** 浏览器本次会话公钥 base64(SPKI)，用于服务端包裹会话密钥 */

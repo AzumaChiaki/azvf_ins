@@ -206,7 +206,10 @@ export async function buildServer() {
     // trusting an arbitrary chain lets clients forge req.ip and bypass limits.
     trustProxy: config.trustProxy ? 1 : false,
     requestTimeout: 30_000,
-    connectionTimeout: 10_000,
+    // Route-level upstream calls have their own AbortSignal deadlines. A
+    // shorter socket timeout destroys the connection before Fastify can send
+    // the resulting HTTP error, which the reverse proxy can only report as 502.
+    connectionTimeout: 0,
     keepAliveTimeout: 5_000,
     maxRequestsPerSocket: 1_000,
   })

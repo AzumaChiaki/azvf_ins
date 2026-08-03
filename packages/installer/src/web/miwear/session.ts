@@ -427,6 +427,13 @@ export class MiWearSession {
     massMd5: Uint8Array,
     progress?: (value: InstallProgress) => void
   ): Promise<void> {
+    // Capture the controller for this authenticated connection. The read loop
+    // clears this.sar when the port ends; a non-null assertion at flush time
+    // then becomes a probabilistic "enqueueBatch of undefined" crash instead
+    // of the recoverable SAR-close rejection already provided by the captured
+    // controller.
+    const sar = this.sar
+    if (!sar) throw new Error('SAR 会话已关闭，请重新连接设备')
     let response: IncomingMessage | undefined
     for (let attempt = 0; attempt < 3; attempt++) {
       response = await this.requestPb(buildMassPrepare(opts.resType, massMd5, opts.size), ['mass-prepare'], 30000)
@@ -461,7 +468,7 @@ export class MiWearSession {
     if (!Number.isSafeInteger(totalParts) || totalParts < 1 || totalParts > 0xffff) {
       throw new Error(`MASS 分片总数超出设备协议上限: ${totalParts}`)
     }
-    const windowSize = Math.min(this.sar?.windowSize ?? 8, 32)
+    const windowSize = Math.min(sar.windowSize, 32)
 
     let crcState = crc32Init()
     let buffer: Uint8Array = new Uint8Array(0)
@@ -487,7 +494,7 @@ export class MiWearSession {
         L2Opcode.Write,
         concatBytes(u16le(totalParts), u16le(part), fragment),
       ))
-      const acknowledgements = this.sar!.enqueueBatch(payloads)
+      const acknowledgements = sar.enqueueBatch(payloads)
       entries.forEach(({ part }, index) => {
         let tracked: Promise<void>
         tracked = acknowledgements[index]!

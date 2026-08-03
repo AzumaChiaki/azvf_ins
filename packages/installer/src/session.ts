@@ -1,10 +1,13 @@
 import { timingSafeEqual } from 'node:crypto'
-import type { SignedResourceMeta, WatchfaceInstallTransform } from '@azvf/contract'
+import type { SessionInitResponse, SignedResourceMeta, WatchfaceInstallTransform } from '@azvf/contract'
 import type { SessionControlContext, SessionCryptoKeys } from './crypto/index.js'
 export type InstallSessionState = 'created' | 'authorizing' | 'streaming' | 'recoverable' | 'delivered' | 'cancelled'
 
 export interface InstallSession {
   sessionId: string
+  attemptId: string
+  initializationFingerprint: Buffer
+  initialResponse: SessionInitResponse
   resourceId: string
   userId: string
   entitlementId: string
@@ -44,6 +47,7 @@ export interface InstallSession {
 
 export class SessionStore {
   private readonly sessions = new Map<string, InstallSession>()
+  private readonly attempts = new Map<string, string>()
   private readonly timer: NodeJS.Timeout
 
   constructor(
@@ -56,14 +60,37 @@ export class SessionStore {
 
   put(session: InstallSession): void {
     if (this.sessions.has(session.sessionId)) throw new Error('会话 ID 冲突')
+    if (this.attempts.has(session.attemptId)) throw new Error('会话创建尝试 ID 冲突')
     this.sessions.set(session.sessionId, session)
+    this.attempts.set(session.attemptId, session.sessionId)
+  }
+
+  initialization(attemptId: string, fingerprint: Buffer): SessionInitResponse | 'conflict' | undefined {
+    const sessionId = this.attempts.get(attemptId)
+    if (!sessionId) return undefined
+    const session = this.live(sessionId)
+    if (!session) {
+      this.attempts.delete(attemptId)
+      return undefined
+    }
+    if (session.initializationFingerprint.length !== fingerprint.length
+      || !timingSafeEqual(session.initializationFingerprint, fingerprint)) return 'conflict'
+    return session.initialResponse
+  }
+
+  private drop(id: string): InstallSession | undefined {
+    const session = this.sessions.get(id)
+    if (!session) return undefined
+    this.sessions.delete(id)
+    if (this.attempts.get(session.attemptId) === id) this.attempts.delete(session.attemptId)
+    return session
   }
 
   private live(id: string): InstallSession | undefined {
     const session = this.sessions.get(id)
     if (!session) return undefined
     if (this.now() >= session.expiresAt) {
-      this.sessions.delete(id)
+      this.drop(id)
       this.onExpired(session)
       return undefined
     }
@@ -127,16 +154,14 @@ export class SessionStore {
   }
 
   remove(id: string): InstallSession | undefined {
-    const session = this.sessions.get(id)
-    if (session) this.sessions.delete(id)
-    return session
+    return this.drop(id)
   }
 
   cleanup(): void {
     const now = this.now()
     for (const [id, session] of this.sessions) {
       if (now >= session.expiresAt) {
-        this.sessions.delete(id)
+        this.drop(id)
         this.onExpired(session)
       }
     }
@@ -146,5 +171,6 @@ export class SessionStore {
     clearInterval(this.timer)
     for (const session of this.sessions.values()) this.onExpired(session)
     this.sessions.clear()
+    this.attempts.clear()
   }
 }

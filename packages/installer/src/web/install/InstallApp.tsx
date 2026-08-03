@@ -132,6 +132,13 @@ export function InstallApp() {
   // 跳回核销页前先优雅关闭串口：导航时强关在部分浏览器上会让标签页崩溃。
   const closeDeviceSession = () => sessionRef.current?.disconnect(false).catch(() => undefined) ?? Promise.resolve()
 
+  const navigateAfterClosingDevice = async (target: string, replace = false) => {
+    authorizationRequestRef.current++
+    await closeDeviceSession()
+    if (replace) window.location.replace(target)
+    else window.location.href = target
+  }
+
   useEffect(() => {
     onBeforeReauth(closeDeviceSession)
     onReauthRequired((target) => setReauthTarget(target))
@@ -143,12 +150,14 @@ export function InstallApp() {
   // 会绕开上面这条清理路径，触发同一个"导航时强关串口"崩溃。左键无修饰键的点击
   // 一律先走优雅关闭，再手动导航；中键/Ctrl/Cmd 点击（新标签页打开）不受影响，
   // 因为当前标签页并未离开、串口也不会被撕掉。
-  const returnToRedeem = async (event: ReactMouseEvent<HTMLAnchorElement>) => {
+  const navigateLinkAfterClosingDevice = async (event: ReactMouseEvent<HTMLAnchorElement>, target: string) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
     event.preventDefault()
-    await closeDeviceSession()
-    window.location.href = runtimeConfig.redeemUrl
+    await navigateAfterClosingDevice(target)
   }
+
+  const returnToRedeem = (event: ReactMouseEvent<HTMLAnchorElement>) =>
+    navigateLinkAfterClosingDevice(event, runtimeConfig.redeemUrl)
 
   useEffect(() => {
     setResourceId((current) => selectAuthorizedResource(current, authorization))
@@ -206,7 +215,7 @@ export function InstallApp() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const parsed = parseAuthorizationResponse(await response.json())
       if (Object.keys(parsed.resourceTokens).length === 0 || parsed.resources.length === 0) {
-        window.location.replace('https://install.azki.ai')
+        await navigateAfterClosingDevice(runtimeConfig.redeemUrl, true)
         return
       }
       if (authorizationRequestRef.current === requestId) setAuthorization(parsed)
@@ -523,7 +532,8 @@ export function InstallApp() {
         ) : (
           <div className="empty-authorization">
             {connected
-              ? <>这台设备当前没有可安装的资源。请先在<a href={runtimeConfig.redeemUrl}>核销页</a>完成验证。</>
+              ? <>这台设备当前没有可安装的资源。请先在<a href={runtimeConfig.redeemUrl}
+                  onClick={(event) => void returnToRedeem(event)}>核销页</a>完成验证。</>
               : '连接设备后，这里会显示该设备可安装的资源。'}
           </div>
         )}
@@ -549,7 +559,7 @@ export function InstallApp() {
 
       {status && <p className="status-message" role="status">{status}</p>}
       </main>
-      <InstallFooter />
+      <InstallFooter onLocalNavigate={(event, target) => void navigateLinkAfterClosingDevice(event, target)} />
       {showAuthkeyHelp && (
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="什么是 authkey，如何获取？" onClick={() => setShowAuthkeyHelp(false)}>
           <div className="modal-card" onClick={(event) => event.stopPropagation()}>
@@ -617,7 +627,7 @@ export function InstallApp() {
             <div className="modal-head"><h3>需要重新核销</h3></div>
             <p className="modal-intro">当前安装授权已失效或运行环境发生变化。设备连接已安全关闭，请返回核销页重新验证后再继续。</p>
             <div className="form-row">
-              <button type="button" onClick={() => { window.location.href = reauthTarget }}>返回核销页</button>
+              <button type="button" onClick={() => void navigateAfterClosingDevice(reauthTarget)}>返回核销页</button>
             </div>
           </div>
         </div>

@@ -197,8 +197,30 @@ async function sendControl(
 
 const retryDelay = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 
+/** Retry a possibly-lost session-init response with the exact same key exchange and idempotency key. */
+export async function createInstallationSession(request: SessionInitRequest): Promise<Response> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await apiFetch('/api/session', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+        signal: AbortSignal.timeout(45_000),
+      })
+      if (attempt === 1 || ![502, 503, 504].includes(response.status)) return response
+      lastError = new Error(`HTTP ${response.status}`)
+    } catch (error) {
+      lastError = error
+      if (attempt === 1) throw error
+    }
+    await retryDelay(250)
+  }
+  throw lastError instanceof Error ? lastError : new Error('建立会话请求失败')
+}
+
 function isRecoverableTransportError(error: Error): boolean {
-  return /(设备已断开|串口|serial|连接|connect|读取|写入|ACK|超时|timeout|下载线程|network|fetch|设备繁忙|MASS Prepare)/i.test(error.message)
+  return /(设备已断开|串口|serial|连接|connect|读取|写入|ACK|超时|timeout|下载线程|network|fetch|设备繁忙|MASS Prepare|SAR 会话已关闭|enqueueBatch)/i.test(error.message)
     && !/(摘要|签名|篡改|格式无效|资源大小|存储空间|电量|不支持|授权|租约续期)/.test(error.message)
 }
 
@@ -233,18 +255,14 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
   const pair = await generateSessionKeypair()
   const clientPublicKey = await exportPublicKey(pair.publicKey)
   const request: SessionInitRequest = {
+    attemptId: crypto.randomUUID(),
     authToken: opts.authToken,
     clientPublicKey,
     resourceId: opts.resourceId,
     deviceAddr: deviceId,
     clientAttributes: collectClientAttributes(),
   }
-  const response = await apiFetch('/api/session', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(request),
-    signal: AbortSignal.timeout(30_000),
-  })
+  const response = await createInstallationSession(request)
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { error?: string; code?: string; retryAfterSeconds?: number }
     if (response.status === 429) {

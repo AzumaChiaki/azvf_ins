@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { runtimeConfig } from '@azvf/ui/runtime-config'
 
 /**
@@ -6,7 +6,9 @@ import { runtimeConfig } from '@azvf/ui/runtime-config'
  * 页脚底部只保留版权信息（含许可证要求的 AstroBox-NG 署名），不再散落
  * 链接列；返回核销页入口在页面顶部页眉处（见 InstallApp）。
  */
-export function InstallFooter() {
+export function InstallFooter({ onLocalNavigate }: {
+  onLocalNavigate: (event: ReactMouseEvent<HTMLAnchorElement>, target: string) => void
+}) {
   const [showLicenses, setShowLicenses] = useState(false)
   const [sections, setSections] = useState<Array<{
     id: string; title: string; links: Array<{ id: string; label: string; kind: 'link' | 'action' | 'text'; href?: string; actionId?: string }>
@@ -14,7 +16,7 @@ export function InstallFooter() {
 
   useEffect(() => {
     const controller = new AbortController()
-    void fetch('/api/site-content', { cache: 'force-cache', signal: controller.signal })
+    void fetch('/api/site-content?page=install', { cache: 'force-cache', signal: controller.signal })
       .then((response) => response.ok ? response.json() : undefined)
       .then((content: { sections?: unknown } | undefined) => {
         if (Array.isArray(content?.sections)) setSections(content.sections as typeof sections)
@@ -30,9 +32,12 @@ export function InstallFooter() {
             {sections.map((section) => <section key={section.id} className="az-footer-col">
               <span className="az-footer-title">{section.title}</span>
               {section.links.map((link) => link.kind === 'link' && link.href
-                ? <a key={link.id} className="az-footer-link" href={link.href} target={link.href.startsWith('/') ? undefined : '_blank'} rel="noopener noreferrer">{link.label}</a>
+                ? <a key={link.id} className="az-footer-link" href={link.href} target={link.href.startsWith('/') ? undefined : '_blank'}
+                    rel="noopener noreferrer" onClick={link.href.startsWith('/')
+                      ? (event) => onLocalNavigate(event, link.href!) : undefined}>{link.label}</a>
                 : link.kind === 'action' && link.actionId === 'open-resource-contact'
-                  ? <a key={link.id} className="az-footer-link" href={runtimeConfig.redeemUrl}>{link.label}</a>
+                  ? <a key={link.id} className="az-footer-link" href={runtimeConfig.redeemUrl}
+                      onClick={(event) => onLocalNavigate(event, runtimeConfig.redeemUrl)}>{link.label}</a>
                   : <span key={link.id} className="az-footer-link">{link.label}</span>)}</section>)}
           </div>}
           <div className="az-footer-bottom">

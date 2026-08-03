@@ -61,8 +61,9 @@ interface EventBody { event: InstallEventType; detail?: string; attempt?: number
 const sessionBodySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['authToken', 'clientPublicKey', 'resourceId', 'deviceAddr', 'clientAttributes'],
+  required: ['attemptId', 'authToken', 'clientPublicKey', 'resourceId', 'deviceAddr', 'clientAttributes'],
   properties: {
+    attemptId: { type: 'string', minLength: 36, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' },
     authToken: { type: 'string', minLength: 32, maxLength: 16_384 },
     clientPublicKey: { type: 'string', minLength: 128, maxLength: 8_192, pattern: '^[A-Za-z0-9+/]+={0,2}$' },
     resourceId: { type: 'string', minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' },
@@ -289,12 +290,28 @@ export async function installerRoutes(app: FastifyInstance) {
 
   app.post<{ Body: SessionInitRequest }>('/api/session', { schema: { body: sessionBodySchema } }, async (req, reply) => {
     if (!checkRate(limiter, req, reply, 'session', config.sessionRateLimitPerMinute)) return
-    const { authToken, clientPublicKey, resourceId } = req.body
+    const { attemptId, authToken, clientPublicKey, resourceId } = req.body
     let deviceAddress: string
     try {
       deviceAddress = normalizeDeviceAddress(req.body.deviceAddr)
     } catch (error: any) {
       return reply.code(400).send({ error: error.message })
+    }
+
+    const initializationFingerprint = createHash('sha256').update(JSON.stringify([
+      authToken,
+      clientPublicKey,
+      resourceId,
+      deviceAddress,
+      req.body.clientAttributes,
+    ])).digest()
+    const previousInitialization = sessions.initialization(attemptId, initializationFingerprint)
+    if (previousInitialization === 'conflict') {
+      req.log.warn({ attemptId }, 'session initialization attempt was reused with different inputs')
+      return reply.code(409).send({ error: '会话创建尝试与原请求不一致' })
+    }
+    if (previousInitialization) {
+      return reply.header('cache-control', 'no-store').send(previousInitialization)
     }
 
     let auth: VerifiedAuthToken
@@ -384,8 +401,26 @@ export async function installerRoutes(app: FastifyInstance) {
       } as const
       const controlMac = toBase64(await createControlMac(cryptoKeys.controlKey, controlContext))
       const controlToken = randomBytes(32).toString('base64url')
+      const response: SessionResponse = {
+        sessionId,
+        controlToken,
+        leaseExpiresAt,
+        protocolVersion: WIRE_PROTOCOL_VERSION,
+        wrappedKey,
+        serverEpoch,
+        transportTotal: controlContext.transportTotal,
+        realTotal: controlContext.realTotal,
+        padTo: controlContext.padTo,
+        controlMac,
+        meta,
+        watchfaceTransform,
+        streamUrl: `/api/session/${sessionId}/stream`,
+      }
       sessions.put({
         sessionId,
+        attemptId,
+        initializationFingerprint,
+        initialResponse: response,
         resourceId,
         userId: auth.sub,
         entitlementId: auth.entitlementId,
@@ -412,22 +447,6 @@ export async function installerRoutes(app: FastifyInstance) {
       })
       leases.recordEvent({ sessionId, entitlementId: auth.entitlementId, resourceId, deviceAddress, event: 'session.created' })
       sendTelemetry(req, { sessionId, resourceId, deviceAddress }, 'install.started')
-
-      const response: SessionResponse = {
-        sessionId,
-        controlToken,
-        leaseExpiresAt,
-        protocolVersion: WIRE_PROTOCOL_VERSION,
-        wrappedKey,
-        serverEpoch,
-        transportTotal: controlContext.transportTotal,
-        realTotal: controlContext.realTotal,
-        padTo: controlContext.padTo,
-        controlMac,
-        meta,
-        watchfaceTransform,
-        streamUrl: `/api/session/${sessionId}/stream`,
-      }
       return reply.header('cache-control', 'no-store').send(response)
     } catch (error) {
       if (acquired) {

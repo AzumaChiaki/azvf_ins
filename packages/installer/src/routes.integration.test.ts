@@ -289,6 +289,7 @@ describe('Installer authenticated v3 route', () => {
 
     const browserKeys = await generateSessionKeypair()
     const clientPublicKey = await exportPublicKey(browserKeys.publicKey)
+    const firstAttemptId = 'session_attempt_1234567890abcdefghijklmnop'
     const { buildServer } = await import('./server.js')
     const app = await buildServer()
     try {
@@ -310,7 +311,8 @@ describe('Installer authenticated v3 route', () => {
       const missingClientContext = await app.inject({
         method: 'POST',
         url: '/api/session',
-        payload: { authToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'aa-bb-cc-dd-ee-ff' },
+        payload: { attemptId: 'missing_context_attempt_1234567890abcdef', authToken, clientPublicKey,
+          resourceId: meta.id, deviceAddr: 'aa-bb-cc-dd-ee-ff' },
       })
       expect(missingClientContext.statusCode).toBe(400)
       expect(consumed).toBe(0)
@@ -318,7 +320,8 @@ describe('Installer authenticated v3 route', () => {
       const init = await app.inject({
         method: 'POST',
         url: '/api/session',
-        payload: { authToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'aa-bb-cc-dd-ee-ff', clientAttributes },
+        payload: { attemptId: firstAttemptId, authToken, clientPublicKey, resourceId: meta.id,
+          deviceAddr: 'aa-bb-cc-dd-ee-ff', clientAttributes },
       })
       expect(init.statusCode, init.body).toBe(200)
       const session = init.json() as SessionInitResponse
@@ -331,6 +334,28 @@ describe('Installer authenticated v3 route', () => {
       expect(session.watchfaceTransform?.fieldEnd).toBe(WATCHFACE_HEADER_LENGTH)
       const rewritten = patchWatchfaceChunk(plaintext, 0, session.watchfaceTransform!)
       expect(session.watchfaceTransform?.md5).toBe(createHash('md5').update(rewritten).digest('hex'))
+      expect(consumed).toBe(1)
+
+      // A reverse proxy or browser may lose the first response after the
+      // server has consumed the one-shot JWT. Repeating the exact attempt must
+      // recover the same key exchange without consuming again.
+      const recoveredInit = await app.inject({
+        method: 'POST',
+        url: '/api/session',
+        payload: { attemptId: firstAttemptId, authToken, clientPublicKey, resourceId: meta.id,
+          deviceAddr: 'AA:BB:CC:DD:EE:FF', clientAttributes },
+      })
+      expect(recoveredInit.statusCode, recoveredInit.body).toBe(200)
+      expect(recoveredInit.json()).toEqual(session)
+      expect(consumed).toBe(1)
+
+      const conflictingAttempt = await app.inject({
+        method: 'POST',
+        url: '/api/session',
+        payload: { attemptId: firstAttemptId, authToken, clientPublicKey, resourceId: meta.id,
+          deviceAddr: 'AA:BB:CC:DD:EE:FF', clientAttributes: { ...clientAttributes, language: 'en-US' } },
+      })
+      expect(conflictingAttempt.statusCode).toBe(409)
       expect(consumed).toBe(1)
 
       const siteContent = await app.inject({ method: 'GET', url: '/api/site-content' })
@@ -352,7 +377,8 @@ describe('Installer authenticated v3 route', () => {
       const concurrencyRejected = await app.inject({
         method: 'POST',
         url: '/api/session',
-        payload: { authToken: secondToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FE', clientAttributes },
+        payload: { attemptId: 'concurrency_attempt_1234567890abcdefgh', authToken: secondToken, clientPublicKey,
+          resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FE', clientAttributes },
       })
       expect(concurrencyRejected.statusCode).toBe(429)
       expect(consumed).toBe(1) // A rejected local lease must never charge a remote install attempt.
@@ -441,7 +467,8 @@ describe('Installer authenticated v3 route', () => {
       const tokenReplay = await app.inject({
         method: 'POST',
         url: '/api/session',
-        payload: { authToken, clientPublicKey, resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FF', clientAttributes },
+        payload: { attemptId: 'token_replay_attempt_1234567890abcdefgh', authToken, clientPublicKey,
+          resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FF', clientAttributes },
       })
       expect(tokenReplay.statusCode).toBe(409)
       // One initial quota consume plus a capability refresh before each stream.
