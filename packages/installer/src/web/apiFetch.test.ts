@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiFetch, onBeforeReauth, ReauthRedirect, REAUTH_HEADER } from './apiFetch.js'
+import { apiFetch, onBeforeReauth, onReauthRequired, ReauthRedirect, REAUTH_HEADER, REAUTH_REASON_HEADER } from './apiFetch.js'
 
 const originalFetch = globalThis.fetch
 const originalWindow = (globalThis as { window?: unknown }).window
@@ -15,13 +15,14 @@ function respondWith(headers: Record<string, string>): void {
 }
 
 describe('安装页请求出口', () => {
-  beforeEach(() => { onBeforeReauth(undefined) })
+  beforeEach(() => { onBeforeReauth(undefined); onReauthRequired(undefined) })
 
   afterEach(() => {
     globalThis.fetch = originalFetch
     if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window
     else (globalThis as { window?: unknown }).window = originalWindow
     onBeforeReauth(undefined)
+    onReauthRequired(undefined)
   })
 
   it('没有指令时原样返回响应', async () => {
@@ -69,5 +70,18 @@ describe('安装页请求出口', () => {
     const location = stubWindow()
     await expect(apiFetch('/api/session')).rejects.toBeInstanceOf(ReauthRedirect)
     expect(location.href).toBe('https://redeem.example.test/')
+  })
+
+  it('把订单绑定冲突作为专用原因交给页面，而不是通用环境变化', async () => {
+    respondWith({ [REAUTH_HEADER]: '/redeem', [REAUTH_REASON_HEADER]: 'order_bound_to_other_device' })
+    stubWindow()
+    const received: unknown[] = []
+    onReauthRequired((target, reason) => { received.push({ target, reason }) })
+    await expect(apiFetch('/api/device/authorizations')).rejects.toMatchObject({
+      name: ReauthRedirect.name,
+      target: '/redeem',
+      reason: 'order_bound_to_other_device',
+    })
+    expect(received).toEqual([{ target: '/redeem', reason: 'order_bound_to_other_device' }])
   })
 })

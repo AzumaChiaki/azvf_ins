@@ -68,6 +68,7 @@ const sessionBodySchema = {
     clientPublicKey: { type: 'string', minLength: 128, maxLength: 8_192, pattern: '^[A-Za-z0-9+/]+={0,2}$' },
     resourceId: { type: 'string', minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' },
     deviceAddr: { type: 'string', minLength: 8, maxLength: 64, pattern: DEVICE_IDENTIFIER_PATTERN },
+    deviceName: { type: 'string', minLength: 1, maxLength: 100, pattern: '^[^\\u0000-\\u001f\\u007f]+$' },
     clientAttributes: {
       type: 'object', additionalProperties: false,
       required: ['timeZone', 'language', 'screen', 'hardwareConcurrency', 'platform', 'engine'],
@@ -303,6 +304,7 @@ export async function installerRoutes(app: FastifyInstance) {
       clientPublicKey,
       resourceId,
       deviceAddress,
+      req.body.deviceName ?? null,
       req.body.clientAttributes,
     ])).digest()
     const previousInitialization = sessions.initialization(attemptId, initializationFingerprint)
@@ -367,6 +369,7 @@ export async function installerRoutes(app: FastifyInstance) {
         authorization: authToken,
         resourceId,
         deviceAddress,
+        deviceName: req.body.deviceName,
         consumptionId,
         sessionId,
         expiresAt: Math.min(expiresAt, leaseExpiresAt),

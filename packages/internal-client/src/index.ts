@@ -561,6 +561,7 @@ export async function consumeEntitlement(input: {
   authorization: string
   resourceId: string
   deviceAddress: string
+  deviceName?: string
   consumptionId: string
   sessionId: string
   expiresAt: number
@@ -573,6 +574,7 @@ export async function consumeEntitlement(input: {
     authorization: input.authorization,
     resourceId: input.resourceId,
     deviceAddr: input.deviceAddress,
+    ...(input.deviceName === undefined ? {} : { deviceName: input.deviceName }),
     consumptionId: input.consumptionId,
     sessionId: input.sessionId,
     expiresAt: input.expiresAt,

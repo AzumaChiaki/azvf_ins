@@ -8,17 +8,19 @@
 // 跳转前必须先关闭设备会话：导航时强行中断串口在部分浏览器上会让标签页崩溃。
 
 export const REAUTH_HEADER = 'x-azvf-reauth'
+export const REAUTH_REASON_HEADER = 'x-azvf-reauth-reason'
+export type ReauthReason = 'order_bound_to_other_device' | 'authorization_context_changed'
 
 /** 页面已开始跳转。调用方不必再提示错误，等待导航即可。 */
 export class ReauthRedirect extends Error {
-  constructor(readonly target: string) {
+  constructor(readonly target: string, readonly reason?: ReauthReason) {
     super('需要重新核销')
     this.name = 'ReauthRedirect'
   }
 }
 
 type Teardown = () => Promise<void> | void
-type ReauthHandler = (target: string) => Promise<void> | void
+type ReauthHandler = (target: string, reason?: ReauthReason) => Promise<void> | void
 
 let teardown: Teardown | undefined
 let reauthHandler: ReauthHandler | undefined
@@ -51,8 +53,11 @@ export async function apiFetch(input: string, init?: RequestInit): Promise<Respo
   if (!instruction) return response
   const target = safeTarget(instruction)
   if (!target) return response
+  const rawReason = response.headers.get(REAUTH_REASON_HEADER)
+  const reason: ReauthReason | undefined = rawReason === 'order_bound_to_other_device'
+    || rawReason === 'authorization_context_changed' ? rawReason : undefined
   try { await teardown?.() } catch { /* 清理失败也要跳转 */ }
-  if (reauthHandler) await reauthHandler(target)
+  if (reauthHandler) await reauthHandler(target, reason)
   else window.location.href = target
-  throw new ReauthRedirect(target)
+  throw new ReauthRedirect(target, reason)
 }

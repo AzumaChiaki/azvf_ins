@@ -99,6 +99,8 @@ export interface SessionInitRequest {
   resourceId: string
   /** 规范化前的目标设备 MAC；服务端必须规范化并严格匹配授权绑定。 */
   deviceAddr: string
+  /** Human-readable name confirmed by the installer when connecting this device. */
+  deviceName?: string
   /** 用户同意后采集的低熵运行环境属性；服务端只负责原样转交授权服务。 */
   clientAttributes: {
     timeZone: string

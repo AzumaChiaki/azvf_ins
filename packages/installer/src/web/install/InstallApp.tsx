@@ -4,7 +4,7 @@ import { streamInstall, InstallCooldownError, type StreamProgress } from '../pip
 import { AmbientLayer } from '@azvf/ui'
 import { InstallFooter } from './InstallFooter.js'
 import { runtimeConfig } from '@azvf/ui/runtime-config'
-import { apiFetch, onBeforeReauth, onReauthRequired, ReauthRedirect } from '../apiFetch.js'
+import { apiFetch, onBeforeReauth, onReauthRequired, ReauthRedirect, type ReauthReason } from '../apiFetch.js'
 import {
   emptyAuthorization,
   formatPolicyRemaining,
@@ -41,6 +41,7 @@ function decodeDeviceId(deviceId: string): string {
 }
 
 const isValidDeviceId = (value: string) => /^[A-Za-z0-9+/=_:-]{8,64}$/.test(value.trim())
+const normalizedDeviceName = (value: string) => value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 100)
 
 // authkey 是设备配对密钥，只存在浏览器本地；用 localStorage 而不是 cookie，
 // 避免它随每个 HTTP 请求一起发送。
@@ -110,7 +111,7 @@ export function InstallApp() {
   const disconnectTimesRef = useRef<number[]>([])
   const [cooldownUntil, setCooldownUntil] = useState(0)
   const [deviceHistory, setDeviceHistory] = useState<DeviceHistoryEntry[]>([])
-  const [reauthTarget, setReauthTarget] = useState('')
+  const [reauthPrompt, setReauthPrompt] = useState<{ target: string; reason?: ReauthReason } | null>(null)
 
   useEffect(() => {
     const history = readDeviceHistory()
@@ -141,7 +142,7 @@ export function InstallApp() {
 
   useEffect(() => {
     onBeforeReauth(closeDeviceSession)
-    onReauthRequired((target) => setReauthTarget(target))
+    onReauthRequired((target, reason) => setReauthPrompt({ target, reason }))
     return () => { onBeforeReauth(undefined); onReauthRequired(undefined) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -203,14 +204,17 @@ export function InstallApp() {
    * 提交设备序列号，取回本设备当前可安装的资源与安装令牌。核销页完成的授权
    * 在这一步与设备关联。
    */
-  const refreshDeviceAuthorization = async (deviceSerial: string): Promise<void> => {
+  const refreshDeviceAuthorization = async (deviceSerial: string, deviceName?: string): Promise<void> => {
     const requestId = ++authorizationRequestRef.current
     setLoadingAuthorization(true)
     try {
       const response = await apiFetch('/api/device/authorizations', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ deviceAddr: deviceSerial }),
+        body: JSON.stringify({
+          deviceAddr: deviceSerial,
+          ...(normalizedDeviceName(deviceName ?? '') ? { deviceName: normalizedDeviceName(deviceName ?? '') } : {}),
+        }),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const parsed = parseAuthorizationResponse(await response.json())
@@ -253,6 +257,7 @@ export function InstallApp() {
     try {
       const info = await nextSession.connect({ name, addr, authkey, sarVersion: 2, connectType: 'SPP', reselectPort, preacquiredPort })
       const deviceSerial = await readDeviceSerial(nextSession)
+      const deviceName = normalizedDeviceName(name || info.name)
       setAuthorization(emptyAuthorization())
       setSerial(deviceSerial)
       setConnected(true)
@@ -262,7 +267,7 @@ export function InstallApp() {
         writeDeviceHistory(next)
         return next.slice(0, 6)
       })
-      await refreshDeviceAuthorization(deviceSerial)
+      await refreshDeviceAuthorization(deviceSerial, deviceName)
       return nextSession
     } catch (error) {
       await nextSession.disconnect(false).catch(() => undefined)
@@ -278,6 +283,7 @@ export function InstallApp() {
     try {
       const info = await previous.connect({ name, addr, authkey, sarVersion: 2, connectType: 'SPP', reselectPort: false })
       const reconnectedSerial = await readDeviceSerial(previous)
+      const deviceName = normalizedDeviceName(name || info.name)
       if (serial && reconnectedSerial !== serial) {
         throw new Error('重连到的设备序列号与授权绑定不一致，已停止安装')
       }
@@ -290,7 +296,7 @@ export function InstallApp() {
         writeDeviceHistory(next)
         return next.slice(0, 6)
       })
-      await refreshDeviceAuthorization(reconnectedSerial)
+      await refreshDeviceAuthorization(reconnectedSerial, deviceName)
       return previous
     } catch (error) {
       await previous.disconnect(false).catch(() => undefined)
@@ -395,6 +401,7 @@ export function InstallApp() {
           authToken: selectedToken,
           resourceId,
           deviceAddr: serial,
+          deviceName: normalizedDeviceName(name || session.deviceInfo?.name || ''),
           maxReconnectAttempts: 2,
           reconnect: async (attempt, error, previous) => {
             notify(`连接中断，正在自动重连（${attempt}/2）：${error.message}`)
@@ -415,7 +422,7 @@ export function InstallApp() {
       } else {
         notify(`安装失败：${error instanceof Error ? error.message : String(error)}`)
       }
-      if (serial) await refreshDeviceAuthorization(serial).catch(() => undefined)
+      if (serial) await refreshDeviceAuthorization(serial, name || session.deviceInfo?.name).catch(() => undefined)
     } finally {
       setInstalling(false)
     }
@@ -621,13 +628,17 @@ export function InstallApp() {
           </div>
         </div>
       )}
-      {reauthTarget && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="需要重新核销">
+      {reauthPrompt && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={reauthPrompt.reason === 'order_bound_to_other_device' ? '资源已绑定其他设备' : '需要重新核销'}>
           <div className="modal-card">
-            <div className="modal-head"><h3>需要重新核销</h3></div>
-            <p className="modal-intro">当前安装授权已失效或运行环境发生变化。设备连接已安全关闭，请返回核销页重新验证后再继续。</p>
+            <div className="modal-head"><h3>{reauthPrompt.reason === 'order_bound_to_other_device' ? '资源已绑定其他设备' : '需要重新核销'}</h3></div>
+            <p className="modal-intro">{reauthPrompt.reason === 'order_bound_to_other_device'
+              ? '该资源已绑定到其他设备，无法安装到当前设备。请选择其他订单。'
+              : '当前安装授权已失效或运行环境发生变化。设备连接已安全关闭，请返回核销页重新验证后再继续。'}</p>
             <div className="form-row">
-              <button type="button" onClick={() => void navigateAfterClosingDevice(reauthTarget)}>返回核销页</button>
+              <button type="button" onClick={() => void navigateAfterClosingDevice(reauthPrompt.target)}>
+                {reauthPrompt.reason === 'order_bound_to_other_device' ? '返回核销页选择其他订单' : '返回核销页'}
+              </button>
             </div>
           </div>
         </div>

@@ -38,6 +38,7 @@ describe('installer session initialization retry', () => {
       clientPublicKey: 'public-key',
       resourceId: 'resource-1',
       deviceAddr: 'AA:BB:CC:DD:EE:FF',
+      deviceName: '我的手环',
       clientAttributes: {
         timeZone: 'Asia/Shanghai', language: 'zh-CN', screen: '1920x1080x24',
         hardwareConcurrency: 8, platform: 'MacIntel', engine: 'Chrome' as const,
@@ -48,5 +49,6 @@ describe('installer session initialization retry', () => {
     expect(response.status).toBe(200)
     expect(bodies).toHaveLength(2)
     expect(bodies[1]).toBe(bodies[0])
+    expect(JSON.parse(bodies[0]!)).toMatchObject({ deviceAddr: 'AA:BB:CC:DD:EE:FF', deviceName: '我的手环' })
   })
 })

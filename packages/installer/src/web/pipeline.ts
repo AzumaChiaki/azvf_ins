@@ -44,6 +44,7 @@ export interface StreamInstallOptions {
   authToken: string
   resourceId: string
   deviceAddr?: string
+  deviceName?: string
   /** Re-establishes the device transport without creating another server authorization. */
   reconnect?: (attempt: number, error: Error, previous: MiWearSession) => Promise<MiWearSession>
   maxReconnectAttempts?: number
@@ -260,6 +261,7 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
     clientPublicKey,
     resourceId: opts.resourceId,
     deviceAddr: deviceId,
+    ...(opts.deviceName?.trim() ? { deviceName: opts.deviceName.trim() } : {}),
     clientAttributes: collectClientAttributes(),
   }
   const response = await createInstallationSession(request)

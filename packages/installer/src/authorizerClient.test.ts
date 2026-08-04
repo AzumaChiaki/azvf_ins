@@ -83,12 +83,14 @@ describe('Console authenticated streaming client', () => {
     globalThis.fetch = vi.fn(async (input, init) => {
       const url = new URL(String(input))
       const requestHeaders = new Headers(init?.headers)
+      const requestBody = JSON.parse(new TextDecoder().decode(init?.body as ArrayBuffer)) as Record<string, unknown>
       const nonce = requestHeaders.get('x-azvf-nonce')!
       const timestamp = String(Date.now())
       const digest = createHash('sha256').update(responseBody).digest('hex')
       const canonical = `${nonce}\n200\n${url.pathname}${url.search}\n${digest}\n${responseBody.length}\n${timestamp}`
       expect(init?.method).toBe('POST')
       expect(requestHeaders.get('x-azvf-content-sha256')).toMatch(/^[a-f0-9]{64}$/)
+      expect(requestBody.deviceName).toBe('我的手环')
       return new Response(responseBody, { headers: {
         'x-azvf-json-sha256': digest,
         'x-azvf-json-size': String(responseBody.length),
@@ -101,6 +103,7 @@ describe('Console authenticated streaming client', () => {
       authorization: 'signed.jwt.authorization.token.value',
       resourceId: 'resource-1',
       deviceAddress: 'AA:BB:CC:DD:EE:FF',
+      deviceName: '我的手环',
       consumptionId: 'unique-jti-123456',
       sessionId: capabilityAccess.sessionId,
       expiresAt: Date.now() + 60_000,
