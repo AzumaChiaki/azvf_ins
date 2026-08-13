@@ -150,6 +150,13 @@ export class LeaseStore {
     return Number(row.count)
   }
 
+  /** Seconds until the longest-lived lease matching `whereSql` naturally expires, for a Retry-After hint. */
+  private retryAfterFor(whereSql: string, value: string, now: number): number {
+    const row = this.db.prepare(`SELECT expires_at FROM install_leases WHERE ${whereSql} ORDER BY expires_at DESC LIMIT 1`)
+      .get(value) as { expires_at?: number } | undefined
+    return Math.max(1, Math.ceil(((row?.expires_at ?? now) - now) / 1_000))
+  }
+
   private cleanupWithinTransaction(now: number): void {
     this.db.prepare('DELETE FROM install_leases WHERE expires_at <= ?').run(now)
     this.db.prepare('DELETE FROM consumed_tokens WHERE expires_at <= ? AND NOT EXISTS (SELECT 1 FROM install_leases WHERE token_jti = consumed_tokens.jti)').run(now)
@@ -171,27 +178,31 @@ export class LeaseStore {
       if (this.count('SELECT COUNT(*) AS count FROM install_leases') >= this.limits.global) {
         throw new LeaseError('GLOBAL_LIMIT', '安装服务当前繁忙，请稍后重试')
       }
-      const userLimit = Math.min(this.limits.byTier[input.tier], input.tokenConcurrency)
-      if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE user_id = ?', input.userId) >= userLimit) {
-        throw new LeaseError('USER_LIMIT', `当前账号的 ${input.tier} 等级安装并发已达上限`)
-      }
-      const entitlementLimit = Math.min(this.limits.perEntitlement, input.tokenConcurrency)
-      if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE entitlement_id = ?', input.entitlementId) >= entitlementLimit) {
-        throw new LeaseError('ENTITLEMENT_LIMIT', '该授权的安装并发已达上限')
-      }
+
+      // 设备级残留租约 + CD 豁免必须先于账号/授权并发检查处理:一台设备同一时刻只可能
+      // 有一个真实安装在跑,残留租约几乎总是崩溃/断连的上一次尝试。basic 档并发=1 时,
+      // 若先判 USER_LIMIT,残留租约会在这里的豁免逻辑执行前就已经把请求挡死——豁免机制
+      // 形同虚设,用户只能干等原始租约自然到期(可长达 INSTALL_LEASE_TTL/MAX_DURATION)。
+      // 所以本设备的残留租约必须先在此清掉(或按未豁免情形直接以 DEVICE_LIMIT 拒绝并
+      // 给出 retryAfter),再进入下面按账号/授权计数的检查。
       if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE device_address = ?', input.deviceAddress) !== 0) {
-        // CD 豁免: after repeated failures of this resource on this device the
-        // residual lease is almost certainly from a crashed attempt, so clear
-        // it and let the retry through. Only this device's slot is freed —
-        // global/IP/account/entitlement limits still apply below.
         if (this.failureStreak(input.deviceAddress, input.resourceId, now) >= FAILURE_EXEMPT_THRESHOLD) {
           this.db.prepare('DELETE FROM install_leases WHERE device_address = ?').run(input.deviceAddress)
         } else {
-          const row = this.db.prepare('SELECT expires_at FROM install_leases WHERE device_address = ? ORDER BY expires_at DESC LIMIT 1')
-            .get(input.deviceAddress) as { expires_at?: number } | undefined
-          const retryAfter = Math.max(1, Math.ceil(((row?.expires_at ?? now) - now) / 1_000))
+          const retryAfter = this.retryAfterFor('device_address = ?', input.deviceAddress, now)
           throw new LeaseError('DEVICE_LIMIT', `该设备正在安装冷却中，请等待 ${retryAfter} 秒后重试`, retryAfter)
         }
+      }
+
+      const userLimit = Math.min(this.limits.byTier[input.tier], input.tokenConcurrency)
+      if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE user_id = ?', input.userId) >= userLimit) {
+        const retryAfter = this.retryAfterFor('user_id = ?', input.userId, now)
+        throw new LeaseError('USER_LIMIT', `当前账号的 ${input.tier} 等级安装并发已达上限，请等待 ${retryAfter} 秒后重试`, retryAfter)
+      }
+      const entitlementLimit = Math.min(this.limits.perEntitlement, input.tokenConcurrency)
+      if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE entitlement_id = ?', input.entitlementId) >= entitlementLimit) {
+        const retryAfter = this.retryAfterFor('entitlement_id = ?', input.entitlementId, now)
+        throw new LeaseError('ENTITLEMENT_LIMIT', `该授权的安装并发已达上限，请等待 ${retryAfter} 秒后重试`, retryAfter)
       }
       if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE ip_address = ?', input.ipAddress) >= this.limits.perIp) {
         throw new LeaseError('IP_LIMIT', '当前网络来源的安装并发已达上限')

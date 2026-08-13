@@ -91,6 +91,54 @@ describe('LeaseStore', () => {
     )
   })
 
+  it('waives a basic-tier user\'s own stuck lease before USER_LIMIT can block the retry', () => {
+    // Regression test: basic tier concurrency=1 means USER_LIMIT trips on the very
+    // first retry after a crashed/failed install. The device-level failure-streak
+    // exemption must run *before* USER_LIMIT is evaluated, or a legitimate retry on
+    // the same device is stuck until the stale lease's raw TTL expires (minutes to
+    // an hour), even though the exemption mechanism exists specifically to prevent
+    // that.
+    const value = store({ perEntitlement: 10 })
+    const device = 'AA:BB:CC:DD:EE:BB'
+    const resource = 'resource-basic'
+    const userId = 'afdian:buyer-1'
+    value.acquire(lease('b1', { userId, deviceAddress: device, resourceId: resource, tier: 'basic', tokenConcurrency: 1 }))
+
+    // First retry (no failures recorded yet): blocked, but with an honest
+    // retryAfterSeconds instead of the generic 30s fallback.
+    let firstError: LeaseError | undefined
+    try {
+      value.acquire(lease('b2', { userId, deviceAddress: device, resourceId: resource, tier: 'basic', tokenConcurrency: 1, expiresAt: now + 900_000 }))
+    } catch (error) {
+      firstError = error as LeaseError
+    }
+    expect(firstError?.code).toBe('DEVICE_LIMIT')
+    expect(firstError?.retryAfterSeconds).toBeGreaterThan(0)
+
+    // Two consecutive failures on this device+resource waive the cooldown. The
+    // very next acquire — same user, same basic tier, concurrency=1 — must
+    // succeed immediately, not throw USER_LIMIT.
+    value.recordInstallFailure(device, resource)
+    value.recordInstallFailure(device, resource)
+    expect(() => value.acquire(lease('b3', { userId, deviceAddress: device, resourceId: resource, tier: 'basic', tokenConcurrency: 1 })))
+      .not.toThrow()
+    expect(value.activeCount()).toBe(1)
+  })
+
+  it('gives USER_LIMIT and ENTITLEMENT_LIMIT an accurate retryAfterSeconds instead of a flat fallback', () => {
+    const value = store({ perEntitlement: 10 })
+    value.acquire(lease('u1', { userId: 'user-x', deviceAddress: 'AA:BB:CC:DD:EE:C1', tier: 'basic', tokenConcurrency: 1, expiresAt: now + 42_000 }))
+    let userError: LeaseError | undefined
+    try {
+      value.acquire(lease('u2', { userId: 'user-x', deviceAddress: 'AA:BB:CC:DD:EE:C2', tier: 'basic', tokenConcurrency: 1 }))
+    } catch (error) {
+      userError = error as LeaseError
+    }
+    expect(userError?.code).toBe('USER_LIMIT')
+    expect(userError?.retryAfterSeconds).toBeGreaterThan(0)
+    expect(userError?.retryAfterSeconds).toBeLessThanOrEqual(42)
+  })
+
   it('enforces signed tier, device, entitlement and global limits atomically', () => {
     const value = store()
     value.acquire(lease('01'))
