@@ -121,6 +121,9 @@ export const config = {
   internalClockSkewMs: integer('INTERNAL_CLOCK_SKEW_MS', 30_000, 1_000, 300_000),
   internalRequestTimeoutMs: integer('INTERNAL_REQUEST_TIMEOUT_MS', 30_000, 1_000, 300_000),
   internalStreamIdleTimeoutMs: integer('INTERNAL_STREAM_IDLE_TIMEOUT_MS', 60_000, 5_000, 600_000),
+  // 下游 BLE 回压期间上游读取的空闲窗口上限;窗口随会话剩余租约动态伸缩,
+  // 无回压时仍以 internalStreamIdleTimeoutMs 快速失败。见 streamWindow.ts。
+  installStreamStallMaxMs: integer('INSTALL_STREAM_STALL_MAX_MS', 300_000, 60_000, 900_000),
   // A redeemed installation request always gets at least ten minutes to move
   // from authorization into the encrypted stream, even on older deployments
   // that still carry the former 300-second environment value.

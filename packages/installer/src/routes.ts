@@ -46,6 +46,7 @@ import { normalizeDeviceAddress } from './device.js'
 import { LeaseError, LeaseStore, type InstallEventType } from './leaseStore.js'
 import { RateLimiter } from './rateLimit.js'
 import { SessionStore, type InstallSession } from './session.js'
+import { DOWNSTREAM_STALL_MARK_MS, streamIdleWindowMs } from './streamWindow.js'
 import { createWatchfaceInstallTransform } from './watchfaceTransform.js'
 import { ByteRateGate, splitWireBytes } from './flowThrottle.js'
 
@@ -537,6 +538,8 @@ export async function installerRoutes(app: FastifyInstance) {
       let sampleBytes = 0
       let sampleThrottleWaitMs = 0
       let sampleBackpressureMs = 0
+      // 最近一次下游(BLE 慢速消费)回压的观测时刻,驱动上游读取的动态空闲窗口。
+      let lastDownstreamStallAt = 0
       const throttle = new ByteRateGate(activeSession.throttle)
       let sampleWindowMs = activeSession.throttle.mode === 'enforced'
         ? Number(activeSession.throttle.sampleWindowMs) : 10_000
@@ -574,6 +577,16 @@ export async function installerRoutes(app: FastifyInstance) {
       const source = fetchPlaintextChunks(activeSession.resourceId, activeSession.meta, {
         capability: activeSession.resourceCapability,
         sessionId: activeSession.sessionId,
+      }, {
+        // 下游回压期间按会话剩余租约放宽上游空闲窗口,避免掐断健康慢速安装;
+        // 无回压(上游真卡)时保持 internalStreamIdleTimeoutMs 快速失败。
+        idleTimeoutWindowMs: () => streamIdleWindowMs({
+          now: Date.now(),
+          baseMs: config.internalStreamIdleTimeoutMs,
+          stallMaxMs: config.installStreamStallMaxMs,
+          sessionExpiresAt: activeSession.expiresAt,
+          lastDownstreamStallAt,
+        }),
       })[Symbol.asyncIterator]()
       type Pull = { result?: IteratorResult<Uint8Array>; error?: unknown }
       const pull = (): Promise<Pull> => source.next().then((result) => ({ result }), (error) => ({ error }))
@@ -630,7 +643,9 @@ export async function installerRoutes(app: FastifyInstance) {
             sampleBytes += wirePart.length
             const yieldedAt = Date.now()
             yield Buffer.from(wirePart)
-            sampleBackpressureMs += Math.max(0, Date.now() - yieldedAt)
+            const stalledMs = Math.max(0, Date.now() - yieldedAt)
+            sampleBackpressureMs += stalledMs
+            if (stalledMs >= DOWNSTREAM_STALL_MARK_MS) lastDownstreamStallAt = Date.now()
             await flushSample()
           }
         }

@@ -166,6 +166,7 @@ async function signedFetch(
 async function readStreamChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   abort: (reason?: unknown) => void,
+  idleTimeoutMs: number,
 ): Promise<ReadableStreamReadResult<Uint8Array>> {
   return new Promise((resolve, reject) => {
     let settled = false
@@ -175,7 +176,7 @@ async function readStreamChunk(
       const error = new Error('Console 资源流读取空闲超时')
       abort(error)
       reject(error)
-    }, config.internalStreamIdleTimeoutMs)
+    }, idleTimeoutMs)
     void reader.read().then((value) => {
       if (settled) return
       settled = true
@@ -320,10 +321,20 @@ function verifyResourceResponse(
  * Pulls authenticated plaintext into a single fixed-size buffer and yields it immediately.
  * Memory is O(chunkSize); the complete resource is never retained by Installer.
  */
+export interface PlaintextStreamOptions {
+  /**
+   * 每次上游读之前求值,返回本次读允许的空闲窗口(毫秒)。installer 据此按下游
+   * 回压状态动态放宽窗口(BLE 慢速消费属健康回压);缺省为固定的
+   * internalStreamIdleTimeoutMs,行为与旧版一致。
+   */
+  idleTimeoutWindowMs?: () => number
+}
+
 export async function* fetchPlaintextChunks(
   resourceId: string,
   expected: SignedResourceMeta,
   access: ResourceCapabilityAccess,
+  options?: PlaintextStreamOptions,
 ): AsyncGenerator<Uint8Array> {
   if (!Number.isSafeInteger(expected.size) || expected.size < 1 || expected.size > config.maxResourceBytes) {
     throw new Error('资源大小超出 Installer 限制')
@@ -353,13 +364,19 @@ export async function* fetchPlaintextChunks(
   let total = 0
   let chunks = 0
   let finished = false
+  const resolveIdleWindow = options?.idleTimeoutWindowMs ?? (() => config.internalStreamIdleTimeoutMs)
   try {
     if (!response.ok) throw new UpstreamHttpError(upstreamStatus(response.status), '无法获取资源内容')
     verifyResourceResponse(response, signed, expected.sha256, expected.size)
     if (!response.body || !abort) throw new Error('Console 资源响应缺少流')
     reader = response.body.getReader()
     while (true) {
-      const { done, value } = await readStreamChunk(reader, abort)
+      // 窗口逐次求值并防御异常值(NaN/负数/过小),下限与静态配置一致。
+      const windowMs = resolveIdleWindow()
+      const idleTimeoutMs = Number.isFinite(windowMs)
+        ? Math.max(5_000, Math.trunc(windowMs))
+        : config.internalStreamIdleTimeoutMs
+      const { done, value } = await readStreamChunk(reader, abort, idleTimeoutMs)
       if (done) break
       if (total + value.length > expected.size) throw new Error('Console 资源流超过声明大小')
       hash.update(value)
