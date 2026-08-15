@@ -25,6 +25,8 @@ export interface ResourceMeta {
   /** 表盘(resType=16)专用：从文件头解析出的表盘 ID，供安装 Prepare 阶段使用 */
   watchfaceId?: string | null
   version: string
+  /** 快应用 RPK manifest 解析出的整数版本号；表盘/固件为 null；老资源为 null，下发时对快应用兜底 10 */
+  versionCode?: number | null
   /** 分片大小（字节） */
   chunkSize: number
   /** 总分片数 */

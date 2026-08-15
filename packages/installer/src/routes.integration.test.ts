@@ -328,6 +328,7 @@ describe('Installer authenticated v3 route', () => {
       expect(session.protocolVersion).toBe(WIRE_PROTOCOL_VERSION)
       expect(session.transportTotal).toBe(3)
       expect(session.meta.chunkSha256).toEqual(chunkSha256)
+      expect(session.meta.versionCode).toBeNull()
       expect(session.watchfaceTransform?.id).toMatch(/^\d{12}$/)
       expect(session.watchfaceTransform?.id).not.toBe('000000000000')
       expect(session.watchfaceTransform?.idOffset).toBe(WATCHFACE_ID_OFFSET)

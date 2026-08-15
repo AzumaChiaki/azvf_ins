@@ -100,6 +100,9 @@ function validateMeta(value: ResourceMeta, resourceId: string): ResourceMeta {
   }
   if (!/^[a-fA-F0-9]{64}$/.test(value.sha256) || !/^[a-fA-F0-9]{32}$/.test(value.md5)) throw new Error('资源摘要无效')
   if (typeof value.version !== 'string' || value.version.length < 1 || value.version.length > 128) throw new Error('资源版本无效')
+  if (value.versionCode != null && (!Number.isSafeInteger(value.versionCode) || value.versionCode < 0)) {
+    throw new Error('资源 versionCode 无效')
+  }
   if (value.packageName != null && (typeof value.packageName !== 'string' || value.packageName.length > 256)) {
     throw new Error('资源包名无效')
   }
@@ -116,6 +119,7 @@ function validateMeta(value: ResourceMeta, resourceId: string): ResourceMeta {
     md5: value.md5.toLowerCase(),
     watchfaceId: value.watchfaceId ?? null,
     version: value.version,
+    versionCode: value.versionCode ?? (value.resType === 64 ? 10 : null),
     chunkSize: value.chunkSize,
     totalChunks: value.totalChunks,
   }
