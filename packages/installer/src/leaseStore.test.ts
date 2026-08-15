@@ -57,35 +57,71 @@ describe('LeaseStore', () => {
     expect(resourceConsumptionId(tokenJti, 'resource-a')).not.toBe(resourceConsumptionId(tokenJti, 'resource-b'))
   })
 
-  it('revokes a residual device lease so a concurrent install starts immediately', () => {
+  it('reports the remaining device cooldown and waives it after repeated failures', () => {
     const value = store({ perEntitlement: 10 })
     const device = 'AA:BB:CC:DD:EE:AA'
     const resource = 'resource-x'
-    const first = lease('01', { deviceAddress: device, resourceId: resource, expiresAt: now + 120_000 })
-    expect(value.acquire(first)).toEqual([])
+    value.acquire(lease('01', { deviceAddress: device, resourceId: resource, expiresAt: now + 120_000 }))
 
-    // 同一设备的并发安装直接吊销旧租约，返回旧会话 id，并签发新租约。
-    const revoked = value.acquire(lease('02', { userId: 'user-b', deviceAddress: device, resourceId: resource }))
-    expect(revoked).toEqual(['01'])
+    // A second attempt on the same device is blocked with a real countdown.
+    let retry = 0
+    try {
+      value.acquire(lease('02', { userId: 'user-b', deviceAddress: device, resourceId: resource }))
+    } catch (error) {
+      expect(error).toBeInstanceOf(LeaseError)
+      expect((error as LeaseError).code).toBe('DEVICE_LIMIT')
+      retry = (error as LeaseError).retryAfterSeconds ?? 0
+    }
+    expect(retry).toBeGreaterThan(0)
+    expect(retry).toBeLessThanOrEqual(120)
+
+    // Two consecutive failures of this device+resource waive the cooldown so
+    // the next acquire clears the residual lease and succeeds.
+    value.recordInstallFailure(device, resource)
+    value.recordInstallFailure(device, resource)
+    expect(() => value.acquire(lease('03', { userId: 'user-c', deviceAddress: device, resourceId: resource }))).not.toThrow()
     expect(value.activeCount()).toBe(1)
 
-    // 旧 token 的 replay marker 保留，重放仍被拒绝。
+    // A success resets the streak, so the cooldown applies again afterwards.
+    value.resetInstallFailure(device, resource)
+    value.recordInstallFailure(device, resource)
     expectLeaseCode(
-      () => value.acquire(lease('03', { userId: 'user-c', deviceAddress: 'AA:BB:CC:DD:EE:03', tokenJti: first.tokenJti })),
-      'TOKEN_REPLAY',
+      () => value.acquire(lease('04', { userId: 'user-d', deviceAddress: device, resourceId: resource })),
+      'DEVICE_LIMIT',
     )
   })
 
-  it('revokes a stuck device lease before USER_LIMIT can block the retry', () => {
+  it('waives a basic-tier user\'s own stuck lease before USER_LIMIT can block the retry', () => {
+    // Regression test: basic tier concurrency=1 means USER_LIMIT trips on the very
+    // first retry after a crashed/failed install. The device-level failure-streak
+    // exemption must run *before* USER_LIMIT is evaluated, or a legitimate retry on
+    // the same device is stuck until the stale lease's raw TTL expires (minutes to
+    // an hour), even though the exemption mechanism exists specifically to prevent
+    // that.
     const value = store({ perEntitlement: 10 })
     const device = 'AA:BB:CC:DD:EE:BB'
     const resource = 'resource-basic'
     const userId = 'afdian:buyer-1'
     value.acquire(lease('b1', { userId, deviceAddress: device, resourceId: resource, tier: 'basic', tokenConcurrency: 1 }))
 
-    // 同一设备重试：残留租约被直接吊销，新租约立即签发，不再被 USER_LIMIT 或冷却挡住。
-    const revoked = value.acquire(lease('b2', { userId, deviceAddress: device, resourceId: resource, tier: 'basic', tokenConcurrency: 1, expiresAt: now + 900_000 }))
-    expect(revoked).toEqual(['b1'])
+    // First retry (no failures recorded yet): blocked, but with an honest
+    // retryAfterSeconds instead of the generic 30s fallback.
+    let firstError: LeaseError | undefined
+    try {
+      value.acquire(lease('b2', { userId, deviceAddress: device, resourceId: resource, tier: 'basic', tokenConcurrency: 1, expiresAt: now + 900_000 }))
+    } catch (error) {
+      firstError = error as LeaseError
+    }
+    expect(firstError?.code).toBe('DEVICE_LIMIT')
+    expect(firstError?.retryAfterSeconds).toBeGreaterThan(0)
+
+    // Two consecutive failures on this device+resource waive the cooldown. The
+    // very next acquire — same user, same basic tier, concurrency=1 — must
+    // succeed immediately, not throw USER_LIMIT.
+    value.recordInstallFailure(device, resource)
+    value.recordInstallFailure(device, resource)
+    expect(() => value.acquire(lease('b3', { userId, deviceAddress: device, resourceId: resource, tier: 'basic', tokenConcurrency: 1 })))
+      .not.toThrow()
     expect(value.activeCount()).toBe(1)
   })
 
@@ -103,25 +139,16 @@ describe('LeaseStore', () => {
     expect(userError?.retryAfterSeconds).toBeLessThanOrEqual(42)
   })
 
-  it('revokes a same-device lease and still enforces entitlement limits', () => {
+  it('enforces signed tier, device, entitlement and global limits atomically', () => {
     const value = store()
-    value.acquire(lease('01', { entitlementId: 'shared-entitlement' }))
+    value.acquire(lease('01'))
     expectLeaseCode(() => value.acquire(lease('02')), 'USER_LIMIT')
-
-    // 同一设备并发：直接吊销旧租约并成功签发。
-    expect(value.acquire(lease('03', {
-      userId: 'user-b',
-      deviceAddress: 'AA:BB:CC:DD:EE:01',
-      entitlementId: 'shared-entitlement',
-    }))).toEqual(['01'])
-
-    // 不同设备、不同用户、同一授权：仍受 ENTITLEMENT_LIMIT 约束。
     expectLeaseCode(
-      () => value.acquire(lease('04', {
-        userId: 'user-c',
-        deviceAddress: 'AA:BB:CC:DD:EE:04',
-        entitlementId: 'shared-entitlement',
-      })),
+      () => value.acquire(lease('03', { userId: 'user-b', deviceAddress: 'AA:BB:CC:DD:EE:01' })),
+      'DEVICE_LIMIT',
+    )
+    expectLeaseCode(
+      () => value.acquire(lease('04', { userId: 'user-b', entitlementId: 'entitlement-01' })),
       'ENTITLEMENT_LIMIT',
     )
   })

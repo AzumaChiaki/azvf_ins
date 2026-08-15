@@ -354,9 +354,7 @@ export async function installerRoutes(app: FastifyInstance) {
       const leaseExpiresAt = Math.min(now + config.installLeaseTtlSeconds * 1_000, absoluteExpiresAt)
       // Reserve concurrency before the extra plaintext pass needed to compute
       // a watchface's rewritten MD5; rejected sessions must not amplify reads.
-      // 并发安装：acquire 会直接吊销同一设备的旧租约/旧 token 并返回旧会话 id，
-      // 这里同步吊销内存中的旧会话，避免旧流与新流并存。
-      const revokedSessionIds = leases.acquire({
+      leases.acquire({
         id: sessionId,
         tokenJti: consumptionId,
         tokenExpiresAt: auth.exp * 1_000,
@@ -369,7 +367,6 @@ export async function installerRoutes(app: FastifyInstance) {
         tokenConcurrency: auth.installConcurrency,
         expiresAt: leaseExpiresAt,
       })
-      for (const revokedId of revokedSessionIds) sessions.remove(revokedId)
       acquired = true
       const consumed = await consumeEntitlement({
         entitlementId: auth.entitlementId,

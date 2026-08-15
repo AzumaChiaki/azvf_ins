@@ -46,8 +46,12 @@ export interface AcquireLeaseInput {
 interface CountRow { count: number }
 const CONSUMED_TOKEN_RETENTION_MS = 24 * 60 * 60 * 1_000
 const EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000
-// A failure streak older than this is treated as stale; retained only for the
-// install_failure_streaks telemetry, no longer gates installs or cooldowns.
+// After this many consecutive failed installs of the same resource on the same
+// device, the next acquire clears that device's residual lease so a user stuck
+// behind a crashed attempt can retry immediately (the "CD 豁免").
+const FAILURE_EXEMPT_THRESHOLD = 2
+// A failure streak older than this is treated as stale and no longer grants the
+// exemption, so the per-device cooldown is only waived for active retry loops.
 const FAILURE_STREAK_TTL_MS = 30 * 60 * 1_000
 
 export type InstallEventType = 'session.created' | 'stream.started' | 'stream.resumed' | 'stream.interrupted'
@@ -164,11 +168,10 @@ export class LeaseStore {
     this.transaction(() => this.cleanupWithinTransaction(this.now()))
   }
 
-  acquire(input: AcquireLeaseInput): string[] {
-    return this.transaction(() => {
+  acquire(input: AcquireLeaseInput): void {
+    this.transaction(() => {
       const now = this.now()
       this.cleanupWithinTransaction(now)
-      const revoked: string[] = []
       if (this.count('SELECT COUNT(*) AS count FROM consumed_tokens WHERE jti = ?', input.tokenJti) !== 0) {
         throw new LeaseError('TOKEN_REPLAY', '该安装令牌已使用，请获取新令牌')
       }
@@ -176,13 +179,19 @@ export class LeaseStore {
         throw new LeaseError('GLOBAL_LIMIT', '安装服务当前繁忙，请稍后重试')
       }
 
-      // 并发安装：同一设备的残留租约直接吊销（旧会话 + 释放旧租约），立即签发新的，
-      // 不再进入冷却等待。残留租约几乎总是崩溃/断连的上一次尝试。
-      // 旧 token 的 replay marker 保留在 consumed_tokens（维持单次使用、防重放）。
+      // 设备级残留租约 + CD 豁免必须先于账号/授权并发检查处理:一台设备同一时刻只可能
+      // 有一个真实安装在跑,残留租约几乎总是崩溃/断连的上一次尝试。basic 档并发=1 时,
+      // 若先判 USER_LIMIT,残留租约会在这里的豁免逻辑执行前就已经把请求挡死——豁免机制
+      // 形同虚设,用户只能干等原始租约自然到期(可长达 INSTALL_LEASE_TTL/MAX_DURATION)。
+      // 所以本设备的残留租约必须先在此清掉(或按未豁免情形直接以 DEVICE_LIMIT 拒绝并
+      // 给出 retryAfter),再进入下面按账号/授权计数的检查。
       if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE device_address = ?', input.deviceAddress) !== 0) {
-        const rows = this.db.prepare('SELECT id FROM install_leases WHERE device_address = ?').all(input.deviceAddress) as Array<{ id: string }>
-        this.db.prepare('DELETE FROM install_leases WHERE device_address = ?').run(input.deviceAddress)
-        for (const row of rows) revoked.push(row.id)
+        if (this.failureStreak(input.deviceAddress, input.resourceId, now) >= FAILURE_EXEMPT_THRESHOLD) {
+          this.db.prepare('DELETE FROM install_leases WHERE device_address = ?').run(input.deviceAddress)
+        } else {
+          const retryAfter = this.retryAfterFor('device_address = ?', input.deviceAddress, now)
+          throw new LeaseError('DEVICE_LIMIT', `该设备正在安装冷却中，请等待 ${retryAfter} 秒后重试`, retryAfter)
+        }
       }
 
       const userLimit = Math.min(this.limits.byTier[input.tier], input.tokenConcurrency)
@@ -222,7 +231,6 @@ export class LeaseStore {
         now,
         input.expiresAt,
       )
-      return revoked
     })
   }
 
