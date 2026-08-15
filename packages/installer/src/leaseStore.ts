@@ -146,6 +146,13 @@ export class LeaseStore {
     return Number(row.count)
   }
 
+  /** Seconds until the longest-lived lease matching `whereSql` naturally expires, for a Retry-After hint. */
+  private retryAfterFor(whereSql: string, value: string, now: number): number {
+    const row = this.db.prepare(`SELECT expires_at FROM install_leases WHERE ${whereSql} ORDER BY expires_at DESC LIMIT 1`)
+      .get(value) as { expires_at?: number } | undefined
+    return Math.max(1, Math.ceil(((row?.expires_at ?? now) - now) / 1_000))
+  }
+
   private cleanupWithinTransaction(now: number): void {
     this.db.prepare('DELETE FROM install_leases WHERE expires_at <= ?').run(now)
     this.db.prepare('DELETE FROM consumed_tokens WHERE expires_at <= ? AND NOT EXISTS (SELECT 1 FROM install_leases WHERE token_jti = consumed_tokens.jti)').run(now)
@@ -179,11 +186,15 @@ export class LeaseStore {
       }
 
       const userLimit = Math.min(this.limits.byTier[input.tier], input.tokenConcurrency)
-      this.revokeOldestForScope('user_id = ?', input.userId, userLimit, revoked)
-
+      if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE user_id = ?', input.userId) >= userLimit) {
+        const retryAfter = this.retryAfterFor('user_id = ?', input.userId, now)
+        throw new LeaseError('USER_LIMIT', `当前账号的 ${input.tier} 等级安装并发已达上限，请等待 ${retryAfter} 秒后重试`, retryAfter)
+      }
       const entitlementLimit = Math.min(this.limits.perEntitlement, input.tokenConcurrency)
-      this.revokeOldestForScope('entitlement_id = ?', input.entitlementId, entitlementLimit, revoked)
-
+      if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE entitlement_id = ?', input.entitlementId) >= entitlementLimit) {
+        const retryAfter = this.retryAfterFor('entitlement_id = ?', input.entitlementId, now)
+        throw new LeaseError('ENTITLEMENT_LIMIT', `该授权的安装并发已达上限，请等待 ${retryAfter} 秒后重试`, retryAfter)
+      }
       if (this.count('SELECT COUNT(*) AS count FROM install_leases WHERE ip_address = ?', input.ipAddress) >= this.limits.perIp) {
         throw new LeaseError('IP_LIMIT', '当前网络来源的安装并发已达上限')
       }
@@ -213,19 +224,6 @@ export class LeaseStore {
       )
       return revoked
     })
-  }
-
-  /** 账号/授权并发超限时，吊销最旧的租约腾出名额（并发安装 last-one-wins）。 */
-  private revokeOldestForScope(whereSql: string, value: string, limit: number, revoked: string[]): void {
-    const count = this.count(`SELECT COUNT(*) AS count FROM install_leases WHERE ${whereSql}`, value)
-    const excess = count + 1 - limit
-    if (excess <= 0) return
-    const rows = this.db.prepare(`SELECT id FROM install_leases WHERE ${whereSql} ORDER BY created_at ASC LIMIT ?`)
-      .all(value, excess) as Array<{ id: string }>
-    for (const row of rows) {
-      this.db.prepare('DELETE FROM install_leases WHERE id = ?').run(row.id)
-      revoked.push(row.id)
-    }
   }
 
   private failureStreak(deviceAddress: string, resourceId: string, now: number): number {

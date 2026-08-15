@@ -364,27 +364,25 @@ describe('Installer authenticated v3 route', () => {
       expect(siteContent.json().sections[0].id).toBe('help')
 
       const secondToken = await new SignJWT({
-        grant: 'cardkey', sku: 'sku', resourceIds: [meta.id], entitlementId: 'entitlement-integration-second',
+        grant: 'cardkey', sku: 'sku', resourceIds: [meta.id], entitlementId: 'entitlement-integration',
         deviceAddr: 'AA:BB:CC:DD:EE:FE', tier: 'basic', installConcurrency: 1, clientContextVersion: 2,
       })
         .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: 'integration-key' })
         .setIssuer(TOKEN_ISSUER)
         .setAudience(TOKEN_AUDIENCE)
-        .setSubject('user-integration-second')
+        .setSubject('user-integration')
         .setJti('integration-jti-value-5678')
         .setIssuedAt(now)
         .setExpirationTime(now + 120)
         .sign(signingKeys.privateKey)
-      const secondInstall = await app.inject({
+      const concurrencyRejected = await app.inject({
         method: 'POST',
         url: '/api/session',
-        payload: { attemptId: 'second_install_attempt_1234567890abcdef', authToken: secondToken, clientPublicKey,
+        payload: { attemptId: 'concurrency_attempt_1234567890abcdefgh', authToken: secondToken, clientPublicKey,
           resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FE', clientAttributes },
       })
-      // 并发安装不再返回 429：不同用户/授权/设备直接成功签发；同一用户/设备/授权的
-      // 吊销行为由 leaseStore 单元测试覆盖。
-      expect(secondInstall.statusCode).toBe(200)
-      expect(consumed).toBe(2)
+      expect(concurrencyRejected.statusCode).toBe(429)
+      expect(consumed).toBe(1) // A rejected local lease must never charge a remote install attempt.
 
       const masterKey = await unwrapSessionKey(browserKeys.privateKey, session.wrappedKey)
       const cryptoKeys = await deriveSessionKeys(masterKey)
@@ -474,9 +472,10 @@ describe('Installer authenticated v3 route', () => {
           resourceId: meta.id, deviceAddr: 'AA:BB:CC:DD:EE:FF', clientAttributes },
       })
       expect(tokenReplay.statusCode).toBe(409)
-      // 一次初始额度消费 + 第二个安装会话消费 + 每次 stream 前的能力刷新。
-      // 刷新复用同一 consumptionId，Console 返回 idempotent=true，不会重复计数。
-      expect(consumed).toBe(4)
+      // One initial quota consume plus a capability refresh before each stream.
+      // Every refresh reuses the same consumptionId, so Console returns
+      // idempotent=true and never counts reconnect as another installation.
+      expect(consumed).toBe(3)
     } finally {
       await app.close()
     }
