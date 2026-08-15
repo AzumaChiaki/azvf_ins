@@ -89,44 +89,29 @@ describe('LeaseStore', () => {
     expect(value.activeCount()).toBe(1)
   })
 
-  it('gives USER_LIMIT and ENTITLEMENT_LIMIT an accurate retryAfterSeconds instead of a flat fallback', () => {
+  it('revokes the oldest account lease when basic-tier user concurrency is exhausted', () => {
     const value = store({ perEntitlement: 10 })
-    value.acquire(lease('u1', { userId: 'user-x', deviceAddress: 'AA:BB:CC:DD:EE:C1', tier: 'basic', tokenConcurrency: 1, expiresAt: now + 42_000 }))
-    let userError: LeaseError | undefined
-    try {
-      value.acquire(lease('u2', { userId: 'user-x', deviceAddress: 'AA:BB:CC:DD:EE:C2', tier: 'basic', tokenConcurrency: 1 }))
-    } catch (error) {
-      userError = error as LeaseError
-    }
-    expect(userError?.code).toBe('USER_LIMIT')
-    expect(userError?.retryAfterSeconds).toBeGreaterThan(0)
-    expect(userError?.retryAfterSeconds).toBeLessThanOrEqual(42)
+    const userId = 'user-x'
+    value.acquire(lease('u1', { userId, deviceAddress: 'AA:BB:CC:DD:EE:C1', tier: 'basic', tokenConcurrency: 1, expiresAt: now + 42_000 }))
+
+    // 同一账号、不同设备：吊销最旧的 u1，签发新的 u2。
+    const revoked = value.acquire(lease('u2', { userId, deviceAddress: 'AA:BB:CC:DD:EE:C2', tier: 'basic', tokenConcurrency: 1 }))
+    expect(revoked).toEqual(['u1'])
+    expect(value.activeCount()).toBe(1)
   })
 
-  it('revokes a same-device lease and still enforces entitlement limits', () => {
+  it('revokes the oldest entitlement lease when entitlement concurrency is exhausted', () => {
     const value = store()
-    value.acquire(lease('01', { entitlementId: 'shared-entitlement' }))
-    expectLeaseCode(() => value.acquire(lease('02')), 'USER_LIMIT')
+    const entitlement = 'shared-entitlement'
+    value.acquire(lease('e1', { userId: 'user-a', deviceAddress: 'AA:BB:CC:DD:EE:D1', entitlementId: entitlement }))
 
-    // 同一设备并发：直接吊销旧租约并成功签发。
-    expect(value.acquire(lease('03', {
-      userId: 'user-b',
-      deviceAddress: 'AA:BB:CC:DD:EE:01',
-      entitlementId: 'shared-entitlement',
-    }))).toEqual(['01'])
-
-    // 不同设备、不同用户、同一授权：仍受 ENTITLEMENT_LIMIT 约束。
-    expectLeaseCode(
-      () => value.acquire(lease('04', {
-        userId: 'user-c',
-        deviceAddress: 'AA:BB:CC:DD:EE:04',
-        entitlementId: 'shared-entitlement',
-      })),
-      'ENTITLEMENT_LIMIT',
-    )
+    // 不同用户、不同设备，但同一授权：吊销最旧的 e1，签发新的 e2。
+    const revoked = value.acquire(lease('e2', { userId: 'user-b', deviceAddress: 'AA:BB:CC:DD:EE:D2', entitlementId: entitlement }))
+    expect(revoked).toEqual(['e1'])
+    expect(value.activeCount()).toBe(1)
   })
 
-  it('allows the configured premium staircase but not a fifth install', () => {
+  it('revokes the oldest premium lease when the signed staircase is exhausted', () => {
     const value = store({ perEntitlement: 8 })
     for (let index = 1; index <= 4; index++) {
       value.acquire(lease(`p${index}`, {
@@ -137,16 +122,19 @@ describe('LeaseStore', () => {
         tokenConcurrency: 4,
       }))
     }
-    expectLeaseCode(() => value.acquire(lease('p5', {
+    // 第 5 个安装：吊销最旧的 p1，签发新的 p5。
+    const revoked = value.acquire(lease('p5', {
       tokenJti: 'premium-token-jti-5',
       deviceAddress: 'AA:BB:CC:DD:EF:05',
       entitlementId: 'premium-entitlement',
       tier: 'premium',
       tokenConcurrency: 4,
-    })), 'USER_LIMIT')
+    }))
+    expect(revoked).toEqual(['p1'])
+    expect(value.activeCount()).toBe(4)
   })
 
-  it('lets the signed concurrency claim only tighten local tier and entitlement limits', () => {
+  it('revokes the oldest lease when the signed concurrency claim tightens the limit', () => {
     const value = store({ perEntitlement: 8 })
     for (let index = 1; index <= 2; index++) {
       value.acquire(lease(`s${index}`, {
@@ -157,13 +145,25 @@ describe('LeaseStore', () => {
         tokenConcurrency: 2,
       }))
     }
-    expectLeaseCode(() => value.acquire(lease('s3', {
+    const revoked = value.acquire(lease('s3', {
       tokenJti: 'signed-limit-jti-3',
       deviceAddress: 'AA:BB:CC:DD:F0:03',
       entitlementId: 'signed-limit-entitlement',
       tier: 'internal',
       tokenConcurrency: 2,
-    })), 'USER_LIMIT')
+    }))
+    expect(revoked).toEqual(['s1'])
+    expect(value.activeCount()).toBe(2)
+  })
+
+  it('still enforces the per-IP and global hard limits', () => {
+    const value = store({ perIp: 1 })
+    value.acquire(lease('01', { ipAddress: '10.0.0.1' }))
+    expectLeaseCode(() => value.acquire(lease('02', { userId: 'user-b', ipAddress: '10.0.0.1', deviceAddress: 'AA:BB:CC:DD:EE:02' })), 'IP_LIMIT')
+
+    const tiny = store({ global: 1 })
+    tiny.acquire(lease('01', { deviceAddress: 'AA:BB:CC:DD:EE:01' }))
+    expectLeaseCode(() => tiny.acquire(lease('02', { userId: 'user-b', deviceAddress: 'AA:BB:CC:DD:EE:02', entitlementId: 'entitlement-02' })), 'GLOBAL_LIMIT')
   })
 
   it('keeps jti one-shot after release and cleans expired leases', () => {
