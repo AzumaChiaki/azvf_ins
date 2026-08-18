@@ -125,6 +125,51 @@ describe('LeaseStore', () => {
     expect(value.activeCount()).toBe(1)
   })
 
+  it('counts an abandoned lease as a failure server-side, without any client report', () => {
+    // Regression test: 关掉标签页的那次安装既不会 POST /complete，也不会有任何客户端
+    // 上报。失败计数以前只在客户端上报时才 +1，于是「连续失败 2 次免 CD」这条逃生
+    // 通道在最需要它的场景里永远不会触发——用户只能干等租约自然到期，一次又一次。
+    // 租约走到过期即视为一次失败，计数必须由服务端自己记上。
+    const value = store({ perEntitlement: 10 })
+    const device = 'AA:BB:CC:DD:EE:CC'
+    const resource = 'resource-abandoned'
+
+    // 第一次被放弃的安装：租约到期时服务端记一次失败。
+    value.acquire(lease('a1', { deviceAddress: device, resourceId: resource, expiresAt: now + 10_000 }))
+    now += 11_000
+    value.cleanup()
+    expect(value.activeCount()).toBe(0)
+
+    // 第二次被放弃：同样由服务端记账，凑满豁免阈值。
+    value.acquire(lease('a2', { deviceAddress: device, resourceId: resource, expiresAt: now + 10_000 }))
+    now += 11_000
+    value.cleanup()
+
+    // 第三次尝试时又撞上一条残留租约（上一把还没到期）——CD 必须已被豁免。
+    value.acquire(lease('a3', { deviceAddress: device, resourceId: resource, expiresAt: now + 120_000 }))
+    expect(() => value.acquire(lease('a4', { userId: 'user-z', deviceAddress: device, resourceId: resource })))
+      .not.toThrow()
+    expect(value.activeCount()).toBe(1)
+  })
+
+  it('does not count a released lease as a failure', () => {
+    // release() 是正常收尾（成功，或客户端明确报了失败并自行记账）走的路径。
+    // 只有过期收租约才算「没人报结果」。
+    const value = store({ perEntitlement: 10 })
+    const device = 'AA:BB:CC:DD:EE:DD'
+    const resource = 'resource-released'
+    value.acquire(lease('r1', { deviceAddress: device, resourceId: resource, expiresAt: now + 10_000 }))
+    expect(value.release('r1')).toBe(true)
+    value.acquire(lease('r2', { deviceAddress: device, resourceId: resource, expiresAt: now + 10_000 }))
+    expect(value.release('r2')).toBe(true)
+
+    value.acquire(lease('r3', { deviceAddress: device, resourceId: resource, expiresAt: now + 120_000 }))
+    expectLeaseCode(
+      () => value.acquire(lease('r4', { userId: 'user-y', deviceAddress: device, resourceId: resource })),
+      'DEVICE_LIMIT',
+    )
+  })
+
   it('gives USER_LIMIT and ENTITLEMENT_LIMIT an accurate retryAfterSeconds instead of a flat fallback', () => {
     const value = store({ perEntitlement: 10 })
     value.acquire(lease('u1', { userId: 'user-x', deviceAddress: 'AA:BB:CC:DD:EE:C1', tier: 'basic', tokenConcurrency: 1, expiresAt: now + 42_000 }))

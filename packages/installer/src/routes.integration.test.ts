@@ -444,11 +444,26 @@ describe('Installer authenticated v3 route', () => {
       }
       finalizeChunkSequenceState(replayState)
       expect(Buffer.concat(replayReal.map((part) => Buffer.from(part))).equals(Buffer.from(plaintext))).toBe(true)
+      // 关标签页的兜底释放只能用 navigator.sendBeacon，而 beacon 不能设请求头，控制
+      // 令牌因此允许出现在 body 里。它必须与请求头同强度：伪造的 body 令牌照样 404。
+      const forgedBeacon = await app.inject({
+        method: 'POST',
+        url: `/api/session/${session.sessionId}/complete`,
+        payload: { success: false, control: 'x'.repeat(43) },
+      })
+      expect(forgedBeacon.statusCode).toBe(404)
+      const unauthenticatedBeacon = await app.inject({
+        method: 'POST',
+        url: `/api/session/${session.sessionId}/complete`,
+        payload: { success: false },
+      })
+      expect(unauthenticatedBeacon.statusCode).toBe(404)
+
+      // 正确的 body 令牌与请求头等价：租约在这里就被释放，而不是等 TTL 到期。
       const complete = await app.inject({
         method: 'POST',
         url: `/api/session/${session.sessionId}/complete`,
-        headers: { 'x-session-control': session.controlToken },
-        payload: { success: true, attempt: 1, acknowledgedPart: 18 },
+        payload: { success: true, attempt: 1, acknowledgedPart: 18, control: session.controlToken },
       })
       expect(complete.statusCode).toBe(200)
 

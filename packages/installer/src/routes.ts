@@ -56,7 +56,9 @@ interface SessionResponse extends SessionInitResponse {
 }
 
 interface ControlParams { id: string }
-interface CompleteBody { success: boolean; detail?: string; attempt?: number; acknowledgedPart?: number }
+interface CompleteBody { success: boolean; detail?: string; attempt?: number; acknowledgedPart?: number
+  /** Only for navigator.sendBeacon, which cannot set the x-session-control header. */
+  control?: string }
 interface EventBody { event: InstallEventType; detail?: string; attempt?: number; acknowledgedPart?: number }
 
 const sessionBodySchema = {
@@ -743,17 +745,22 @@ export async function installerRoutes(app: FastifyInstance) {
     return reply.header('cache-control', 'no-store').send({ ok: true, leaseExpiresAt: expiresAt })
   })
 
+  // 关标签页的兜底释放走这里。浏览器在 pagehide 之后不保证还会发普通 fetch，唯一
+  // 可靠的出口是 navigator.sendBeacon —— 而 sendBeacon 不能设置请求头，控制令牌只能
+  // 放进 body。两处是同一个密钥、同一套 timingSafeEqual 校验；query string 一律不接
+  // 受（会进访问日志）。beacon 只允许报失败：success=true 的判定仍要求 delivered 状态。
   app.post<{ Params: ControlParams; Body: CompleteBody }>('/api/session/:id/complete', {
     schema: {
       params: paramsSchema,
       body: {
         type: 'object', additionalProperties: false, required: ['success'],
         properties: { success: { type: 'boolean' }, detail: { type: 'string', maxLength: 500 },
-          attempt: { type: 'integer', minimum: 0, maximum: 100 }, acknowledgedPart: { type: 'integer', minimum: 0 } },
+          attempt: { type: 'integer', minimum: 0, maximum: 100 }, acknowledgedPart: { type: 'integer', minimum: 0 },
+          control: { type: 'string', minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]+$' } },
       },
     },
   }, async (req, reply) => {
-    const hash = controlHash(req.headers['x-session-control'])
+    const hash = controlHash(req.headers['x-session-control']) ?? controlHash(req.body.control)
     const session = hash ? sessions.authorizeControl(req.params.id, hash) : undefined
     if (!session) return reply.code(404).send({ error: 'not found' })
     if (req.body.success && session.state !== 'delivered') {

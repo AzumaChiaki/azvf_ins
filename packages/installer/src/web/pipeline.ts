@@ -196,6 +196,56 @@ async function sendControl(
   })
 }
 
+/**
+ * 关标签页时的租约兜底释放。
+ *
+ * 正常收尾走 pipeline 末尾的 `complete`，但标签页被关掉时那个 finally 根本不会跑；
+ * 更糟的是下载流在服务端的 finally 里会把会话标成 recoverable 并把租约续到
+ * now+INSTALL_LEASE_TTL —— 也就是「关掉标签页反而重置了等待时间」。所以必须在
+ * pagehide 里同步把「这次不算完成」交给浏览器发出去。
+ *
+ * pagehide 之后普通 fetch 不保证还能发出，唯一有保证的出口是 navigator.sendBeacon；
+ * 而 sendBeacon 不能设请求头，控制令牌只能放进 body（服务端 /complete 因此接受
+ * body 里的 control，与请求头同一套校验）。
+ */
+export function abandonBeaconRequest(input: {
+  sessionId: string
+  controlToken: string
+  attempt?: number
+  acknowledgedPart?: number
+  detail?: string
+}): { url: string; body: string } {
+  return {
+    url: `/api/session/${encodeURIComponent(input.sessionId)}/complete`,
+    body: JSON.stringify({
+      success: false,
+      detail: input.detail ?? '页面已关闭，安装中止',
+      attempt: input.attempt ?? 0,
+      acknowledgedPart: input.acknowledgedPart ?? 0,
+      control: input.controlToken,
+    }),
+  }
+}
+
+/** true = 浏览器已接手发送。beacon 被拒时退回 keepalive fetch（Chromium 仍会发，但配额更紧）。 */
+export function sendAbandonBeacon(request: { url: string; body: string }): boolean {
+  const blob = new Blob([request.body], { type: 'application/json' })
+  try {
+    if (navigator.sendBeacon(request.url, blob)) return true
+  } catch { /* fall through to keepalive fetch */ }
+  try {
+    void fetch(request.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: request.body,
+      credentials: 'same-origin',
+      cache: 'no-store',
+      keepalive: true,
+    }).catch(() => undefined)
+    return true
+  } catch { return false }
+}
+
 const retryDelay = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 
 /** Retry a possibly-lost session-init response with the exact same key exchange and idempotency key. */
@@ -491,6 +541,25 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
     }
   }
 
+  // 租约从这一刻起被本页持有，直到下面的 finally 报 complete。这中间标签页随时可能
+  // 被关掉，所以整段生命周期都挂着 pagehide 兜底。
+  let abandoned = false
+  const abandonOnPageHide = (): void => {
+    if (abandoned || completed) return
+    abandoned = true
+    completed = true
+    if (heartbeat) clearInterval(heartbeat)
+    sendAbandonBeacon(abandonBeaconRequest({
+      sessionId: session.sessionId,
+      controlToken: session.controlToken,
+      attempt,
+      acknowledgedPart,
+      detail: completionDetail ?? '页面已关闭，安装中止',
+    }))
+  }
+  const lifecycleTarget = typeof window === 'undefined' ? undefined : window
+  lifecycleTarget?.addEventListener('pagehide', abandonOnPageHide)
+
   try {
     log(`安全会话已认证：${meta.name}，已启用密钥化算法调度与混淆分片`)
     log('v2 流水线已启动：双算法调度 → 诱饵处理 → 信用背压 → 逆向 MiWear 真流式写入')
@@ -559,16 +628,20 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
   } finally {
     completed = true
     if (heartbeat) clearInterval(heartbeat)
-    try {
-      const completion = await sendControl(session, 'complete', {
-        success,
-        detail: completionDetail,
-        attempt,
-        acknowledgedPart,
-      })
-      if (!completion.ok) log(`安装租约释放返回 HTTP ${completion.status}`)
-    } catch (error) {
-      log(`安装租约释放失败: ${errorMessage(error)}`)
+    lifecycleTarget?.removeEventListener('pagehide', abandonOnPageHide)
+    // pagehide 已经用 beacon 报过失败并释放了租约；再报一次只会把失败计数记成两次。
+    if (!abandoned) {
+      try {
+        const completion = await sendControl(session, 'complete', {
+          success,
+          detail: completionDetail,
+          attempt,
+          acknowledgedPart,
+        })
+        if (!completion.ok) log(`安装租约释放返回 HTTP ${completion.status}`)
+      } catch (error) {
+        log(`安装租约释放失败: ${errorMessage(error)}`)
+      }
     }
   }
 }
