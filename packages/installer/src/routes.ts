@@ -46,6 +46,7 @@ import { normalizeDeviceAddress } from './device.js'
 import { LeaseError, LeaseStore, type InstallEventType } from './leaseStore.js'
 import { RateLimiter } from './rateLimit.js'
 import { SessionStore, type InstallSession } from './session.js'
+import { DOWNSTREAM_STALL_MARK_MS, streamIdleWindowMs } from './streamWindow.js'
 import { createWatchfaceInstallTransform } from './watchfaceTransform.js'
 import { ByteRateGate, splitWireBytes } from './flowThrottle.js'
 
@@ -55,7 +56,9 @@ interface SessionResponse extends SessionInitResponse {
 }
 
 interface ControlParams { id: string }
-interface CompleteBody { success: boolean; detail?: string; attempt?: number; acknowledgedPart?: number }
+interface CompleteBody { success: boolean; detail?: string; attempt?: number; acknowledgedPart?: number
+  /** Only for navigator.sendBeacon, which cannot set the x-session-control header. */
+  control?: string }
 interface EventBody { event: InstallEventType; detail?: string; attempt?: number; acknowledgedPart?: number }
 
 const sessionBodySchema = {
@@ -537,6 +540,8 @@ export async function installerRoutes(app: FastifyInstance) {
       let sampleBytes = 0
       let sampleThrottleWaitMs = 0
       let sampleBackpressureMs = 0
+      // 最近一次下游(BLE 慢速消费)回压的观测时刻,驱动上游读取的动态空闲窗口。
+      let lastDownstreamStallAt = 0
       const throttle = new ByteRateGate(activeSession.throttle)
       let sampleWindowMs = activeSession.throttle.mode === 'enforced'
         ? Number(activeSession.throttle.sampleWindowMs) : 10_000
@@ -574,6 +579,16 @@ export async function installerRoutes(app: FastifyInstance) {
       const source = fetchPlaintextChunks(activeSession.resourceId, activeSession.meta, {
         capability: activeSession.resourceCapability,
         sessionId: activeSession.sessionId,
+      }, {
+        // 下游回压期间按会话剩余租约放宽上游空闲窗口,避免掐断健康慢速安装;
+        // 无回压(上游真卡)时保持 internalStreamIdleTimeoutMs 快速失败。
+        idleTimeoutWindowMs: () => streamIdleWindowMs({
+          now: Date.now(),
+          baseMs: config.internalStreamIdleTimeoutMs,
+          stallMaxMs: config.installStreamStallMaxMs,
+          sessionExpiresAt: activeSession.expiresAt,
+          lastDownstreamStallAt,
+        }),
       })[Symbol.asyncIterator]()
       type Pull = { result?: IteratorResult<Uint8Array>; error?: unknown }
       const pull = (): Promise<Pull> => source.next().then((result) => ({ result }), (error) => ({ error }))
@@ -630,7 +645,9 @@ export async function installerRoutes(app: FastifyInstance) {
             sampleBytes += wirePart.length
             const yieldedAt = Date.now()
             yield Buffer.from(wirePart)
-            sampleBackpressureMs += Math.max(0, Date.now() - yieldedAt)
+            const stalledMs = Math.max(0, Date.now() - yieldedAt)
+            sampleBackpressureMs += stalledMs
+            if (stalledMs >= DOWNSTREAM_STALL_MARK_MS) lastDownstreamStallAt = Date.now()
             await flushSample()
           }
         }
@@ -728,17 +745,22 @@ export async function installerRoutes(app: FastifyInstance) {
     return reply.header('cache-control', 'no-store').send({ ok: true, leaseExpiresAt: expiresAt })
   })
 
+  // 关标签页的兜底释放走这里。浏览器在 pagehide 之后不保证还会发普通 fetch，唯一
+  // 可靠的出口是 navigator.sendBeacon —— 而 sendBeacon 不能设置请求头，控制令牌只能
+  // 放进 body。两处是同一个密钥、同一套 timingSafeEqual 校验；query string 一律不接
+  // 受（会进访问日志）。beacon 只允许报失败：success=true 的判定仍要求 delivered 状态。
   app.post<{ Params: ControlParams; Body: CompleteBody }>('/api/session/:id/complete', {
     schema: {
       params: paramsSchema,
       body: {
         type: 'object', additionalProperties: false, required: ['success'],
         properties: { success: { type: 'boolean' }, detail: { type: 'string', maxLength: 500 },
-          attempt: { type: 'integer', minimum: 0, maximum: 100 }, acknowledgedPart: { type: 'integer', minimum: 0 } },
+          attempt: { type: 'integer', minimum: 0, maximum: 100 }, acknowledgedPart: { type: 'integer', minimum: 0 },
+          control: { type: 'string', minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]+$' } },
       },
     },
   }, async (req, reply) => {
-    const hash = controlHash(req.headers['x-session-control'])
+    const hash = controlHash(req.headers['x-session-control']) ?? controlHash(req.body.control)
     const session = hash ? sessions.authorizeControl(req.params.id, hash) : undefined
     if (!session) return reply.code(404).send({ error: 'not found' })
     if (req.body.success && session.state !== 'delivered') {

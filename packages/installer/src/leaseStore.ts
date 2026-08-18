@@ -88,6 +88,7 @@ export class LeaseStore {
         user_id TEXT NOT NULL,
         entitlement_id TEXT NOT NULL,
         device_address TEXT NOT NULL,
+        resource_id TEXT NOT NULL DEFAULT '',
         ip_address TEXT NOT NULL,
         tier TEXT NOT NULL CHECK (tier IN ('basic','standard','premium','internal')),
         token_concurrency INTEGER NOT NULL CHECK (token_concurrency BETWEEN 1 AND 32),
@@ -129,6 +130,11 @@ export class LeaseStore {
     if (!columns.some((column) => column.name === 'token_concurrency')) {
       this.db.exec('ALTER TABLE install_leases ADD COLUMN token_concurrency INTEGER NOT NULL DEFAULT 1 CHECK (token_concurrency BETWEEN 1 AND 32)')
     }
+    // 服务端记失败计数需要知道这条租约装的是哪个资源。老库里的租约没有这一列，
+    // 补列后留空字符串：它们过期时无法归属到 (设备, 资源)，只能不计数。
+    if (!columns.some((column) => column.name === 'resource_id')) {
+      this.db.exec("ALTER TABLE install_leases ADD COLUMN resource_id TEXT NOT NULL DEFAULT ''")
+    }
     this.cleanup()
   }
 
@@ -158,6 +164,15 @@ export class LeaseStore {
   }
 
   private cleanupWithinTransaction(now: number): void {
+    // 租约走到自然过期 = 这次安装既没报成功也没报失败（标签页被关掉、浏览器被杀、
+    // 断网）。失败计数以前只在客户端 POST /complete 时才 +1，于是最需要 CD 豁免的
+    // 那条路径永远记不上数——「连续失败 2 次免 CD」形同虚设。改为在服务端收租约时
+    // 记：客户端上报与否都算得准。
+    for (const row of this.db.prepare('SELECT device_address, resource_id FROM install_leases WHERE expires_at <= ?')
+      .all(now) as Array<Record<string, unknown>>) {
+      const resourceId = String(row.resource_id ?? '')
+      if (resourceId) this.recordInstallFailureWithinTransaction(String(row.device_address), resourceId, now)
+    }
     this.db.prepare('DELETE FROM install_leases WHERE expires_at <= ?').run(now)
     this.db.prepare('DELETE FROM consumed_tokens WHERE expires_at <= ? AND NOT EXISTS (SELECT 1 FROM install_leases WHERE token_jti = consumed_tokens.jti)').run(now)
     this.db.prepare('DELETE FROM install_events WHERE created_at <= ?').run(now - EVENT_RETENTION_MS)
@@ -216,14 +231,15 @@ export class LeaseStore {
       this.db.prepare('INSERT INTO consumed_tokens (jti, expires_at) VALUES (?, ?)').run(input.tokenJti, replayRetainUntil)
       this.db.prepare(`
         INSERT INTO install_leases
-          (id, token_jti, user_id, entitlement_id, device_address, ip_address, tier, token_concurrency, state, created_at, updated_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?)
+          (id, token_jti, user_id, entitlement_id, device_address, resource_id, ip_address, tier, token_concurrency, state, created_at, updated_at, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?)
       `).run(
         input.id,
         input.tokenJti,
         input.userId,
         input.entitlementId,
         input.deviceAddress,
+        input.resourceId,
         input.ipAddress,
         input.tier,
         input.tokenConcurrency,
@@ -241,16 +257,17 @@ export class LeaseStore {
     return Number(row.count)
   }
 
+  private recordInstallFailureWithinTransaction(deviceAddress: string, resourceId: string, now: number): void {
+    const current = this.failureStreak(deviceAddress, resourceId, now)
+    this.db.prepare(`INSERT INTO install_failure_streaks (device_address, resource_id, count, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(device_address, resource_id) DO UPDATE SET count = ?, updated_at = ?`)
+      .run(deviceAddress, resourceId, current + 1, now, current + 1, now)
+  }
+
   /** Increment the consecutive-failure counter for a device+resource. */
   recordInstallFailure(deviceAddress: string, resourceId: string): void {
-    this.transaction(() => {
-      const now = this.now()
-      const current = this.failureStreak(deviceAddress, resourceId, now)
-      this.db.prepare(`INSERT INTO install_failure_streaks (device_address, resource_id, count, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(device_address, resource_id) DO UPDATE SET count = ?, updated_at = ?`)
-        .run(deviceAddress, resourceId, current + 1, now, current + 1, now)
-    })
+    this.transaction(() => this.recordInstallFailureWithinTransaction(deviceAddress, resourceId, this.now()))
   }
 
   /** Clear the failure streak once an install of this device+resource succeeds. */
