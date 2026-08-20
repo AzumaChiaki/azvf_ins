@@ -283,20 +283,19 @@ export function InstallApp() {
     try {
       const info = await previous.connect({ name, addr, authkey, sarVersion: 2, connectType: 'SPP', reselectPort: false })
       const reconnectedSerial = await readDeviceSerial(previous)
-      const deviceName = normalizedDeviceName(name || info.name)
       if (serial && reconnectedSerial !== serial) {
         throw new Error('重连到的设备序列号与授权绑定不一致，已停止安装')
       }
       setSerial(reconnectedSerial)
       setConnected(true)
-      setAuthorization(emptyAuthorization())
       setDeviceHistory((current) => {
         const next = [{ name: name.trim() || info.name, addr: addr.trim(), lastUsed: Date.now(), authkey: authkey.trim() },
           ...current.filter((item) => item.addr !== addr.trim())]
         writeDeviceHistory(next)
         return next.slice(0, 6)
       })
-      await refreshDeviceAuthorization(reconnectedSerial, deviceName)
+      // 自动重连必须沿用当前安装流的令牌。重新签发会使后端撤销旧令牌，
+      // 正在重放的流随即变成 410，紧随其后的租约续期只能得到 404。
       return previous
     } catch (error) {
       await previous.disconnect(false).catch(() => undefined)
