@@ -194,6 +194,18 @@ export class LeaseStore {
         throw new LeaseError('GLOBAL_LIMIT', '安装服务当前繁忙，请稍后重试')
       }
 
+      // 同一设备就同一授权再次发起安装,是重试/换个页面重来,不是第二个并发安装
+      // ——一台设备同一时刻只可能跑一个真实安装。以前这种请求要么撞上下面的设备
+      // 冷却、要么撞上授权并发上限,新会话被直接拒绝,用户只能干等旧租约自然到期
+      // (最长 INSTALL_LEASE_TTL/MAX_DURATION)。而令牌层(Console 的
+      // supersedeInstallTokens)早就是"后来者胜":新令牌一签发就撤销旧令牌。两层
+      // 语义对不上,于是旧会话被判死、新会话又进不来,买家两头落空。
+      // 这里让租约层与令牌层一致:同设备同授权的旧租约直接让位给新会话。
+      // 作用域刻意收窄到"同授权":跨授权在同一设备上连开安装仍受设备冷却约束,
+      // 不同设备之间的并发仍按账号/授权上限计数,多并发权限的语义不受影响。
+      this.db.prepare('DELETE FROM install_leases WHERE device_address = ? AND entitlement_id = ?')
+        .run(input.deviceAddress, input.entitlementId)
+
       // 设备级残留租约 + CD 豁免必须先于账号/授权并发检查处理:一台设备同一时刻只可能
       // 有一个真实安装在跑,残留租约几乎总是崩溃/断连的上一次尝试。basic 档并发=1 时,
       // 若先判 USER_LIMIT,残留租约会在这里的豁免逻辑执行前就已经把请求挡死——豁免机制

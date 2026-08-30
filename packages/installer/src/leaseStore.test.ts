@@ -300,3 +300,40 @@ describe('LeaseStore', () => {
     ])
   })
 })
+
+describe('同设备同授权的重复安装', () => {
+  it('让新会话顶掉旧租约,而不是把新会话拒在门外', () => {
+    const value = store()
+    const device = 'AA:BB:CC:DD:EE:01'
+    const entitlement = 'same-order'
+    value.acquire(lease('1', { deviceAddress: device, entitlementId: entitlement }))
+
+    // 以前这里会撞上 DEVICE_LIMIT(设备冷却)——旧租约没到期,买家只能干等。
+    // 令牌层早就是"后来者胜",租约层必须一致。
+    expect(() => value.acquire(lease('2', { deviceAddress: device, entitlementId: entitlement })))
+      .not.toThrow()
+
+    // 顶掉而不是并存:同一时刻这台设备就一个安装在跑。
+    expect(value.activeCount()).toBe(1)
+    // 旧会话确实已经不在了 —— 续期它会失败。
+    expect(value.renew('1', now + 60_000)).toBe(false)
+    expect(value.renew('2', now + 60_000)).toBe(true)
+  })
+
+  it('不放宽跨授权的设备冷却', () => {
+    const value = store()
+    const device = 'AA:BB:CC:DD:EE:01'
+    value.acquire(lease('1', { deviceAddress: device, entitlementId: 'order-a' }))
+    // 同一台设备去装另一个订单,仍然受设备冷却约束。
+    expect(() => value.acquire(lease('2', { deviceAddress: device, entitlementId: 'order-b' })))
+      .toThrow(LeaseError)
+  })
+
+  it('不放宽不同设备之间的授权并发上限', () => {
+    const value = store({ perEntitlement: 1 })
+    value.acquire(lease('1', { deviceAddress: 'AA:BB:CC:DD:EE:01', entitlementId: 'order-a' }))
+    // 换一台设备装同一个订单,并发上限照常生效——多并发权限的语义不受影响。
+    expect(() => value.acquire(lease('2', { deviceAddress: 'AA:BB:CC:DD:EE:02', entitlementId: 'order-a' })))
+      .toThrow(LeaseError)
+  })
+})
