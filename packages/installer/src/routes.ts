@@ -233,6 +233,36 @@ function leaseError(reply: FastifyReply, error: LeaseError) {
   return reply.code(status).send({ error: error.message, code: error.code, retryAfterSeconds: retryAfter })
 }
 
+/**
+ * 授权核销失败时给买家的说法。Console 会把拒绝原因区分开(被更新的会话取代 /
+ * 真的被撤销 / 设备对不上),以前这三种在这里被压成同一句「授权已撤销」,
+ * 而生产上绝大多数其实是第一种 —— 买家只是又开了一个安装页。
+ */
+export function refusalMessage(error: unknown): string {
+  const code = error instanceof UpstreamHttpError ? error.code : undefined
+  switch (code) {
+    case 'authorization_superseded':
+      return '这次安装已被更新的安装会话取代,请回到最新打开的那个页面继续'
+    case 'authorization_device_mismatch':
+      return '该授权绑定的是另一台设备,请换回原设备,或重新发起一次安装'
+    case 'install_quota_exhausted':
+      return '安装额度已用尽'
+    default:
+      return '授权已撤销、过期或不再可用'
+  }
+}
+
+/**
+ * 上游瞬时故障(5xx、网络中断)不等于授权没了。internal-client 把已知的确定性
+ * 状态原样透出,其余一律归一成 502 —— 所以「502 或根本不是 UpstreamHttpError」
+ * 就是瞬时故障。
+ */
+export function isTransientUpstreamFailure(error: unknown): boolean {
+  if (error instanceof EntitlementDecisionError) return false
+  if (error instanceof UpstreamHttpError) return error.status === 502
+  return true
+}
+
 async function acknowledgeDecision(sessionId: string, error: EntitlementDecisionError): Promise<void> {
   if (!error.decision.messageId) return
   await acknowledgeInstallationMessage({
@@ -510,7 +540,7 @@ export async function installerRoutes(app: FastifyInstance) {
         await acknowledgeDecision(claimed.sessionId, error).catch((ackError) => req.log.warn({ err: ackError }, 'decision acknowledgement failed'))
         return decisionError(reply, error)
       }
-      return reply.code(410).send({ error: '授权已撤销、过期或不再可用' })
+      return reply.code(410).send({ error: refusalMessage(error) })
     }
     if (claimed.state !== 'authorizing') {
       sessions.remove(claimed.sessionId)
@@ -725,6 +755,14 @@ export async function installerRoutes(app: FastifyInstance) {
       ;(session as InstallSession).capabilityExpiresAt = refreshed.capabilityExpiresAt
       ;(session as InstallSession).throttle = refreshed.throttle
     } catch (error) {
+      // 心跳只是客户端侧的保活,不是授权闸门 —— 真正决定还能不能继续收字节的是
+      // 流自己每 30s 的 stream.renew(失败即中断)。所以 Console 抖一下不该让
+      // 正在下载的安装当场毙命:保留会话与租约,让客户端下次心跳重试即可。
+      // 租约仍有自己的 TTL 兜底,持续失败照样会自然到期。
+      if (isTransientUpstreamFailure(error)) {
+        req.log.warn({ err: error, sessionId: session.sessionId }, 'entitlement live-check unavailable; session kept')
+        return reply.code(503).header('retry-after', '5').send({ error: '授权校验暂时不可用,请稍后重试' })
+      }
       req.log.warn({ err: error, sessionId: session.sessionId }, 'entitlement live-check rejected heartbeat')
       sessions.remove(session.sessionId)
       leases.release(session.sessionId)
@@ -732,7 +770,7 @@ export async function installerRoutes(app: FastifyInstance) {
         await acknowledgeDecision(session.sessionId, error).catch((ackError) => req.log.warn({ err: ackError }, 'decision acknowledgement failed'))
         return decisionError(reply, error)
       }
-      return reply.code(410).send({ error: '授权已撤销、过期或不再可用' })
+      return reply.code(410).send({ error: refusalMessage(error) })
     }
     const expiresAt = boundedExpiry(session as InstallSession, config.installLeaseTtlSeconds)
     if (expiresAt <= Date.now() || !leases.renew(session.sessionId, expiresAt)) {

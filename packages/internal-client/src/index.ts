@@ -30,7 +30,8 @@ const config = new Proxy({} as InternalClientConfig, {
 const EMPTY_SHA256 = createHash('sha256').update('').digest('hex')
 
 export class UpstreamHttpError extends Error {
-  constructor(public readonly status: number, message: string) {
+  /** Console 自己的错误码,原样透出,好让调用方分辨具体是哪一种拒绝。 */
+  constructor(public readonly status: number, message: string, public readonly code?: string) {
     super(message)
     this.name = 'UpstreamHttpError'
   }
@@ -605,7 +606,10 @@ export async function consumeEntitlement(input: {
   const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(responseBody)) as Record<string, unknown>
   if (!response.ok) {
     if (parsed?.riskDecision) throw new EntitlementDecisionError(response.status, parseDecision(parsed.riskDecision, false))
-    throw new UpstreamHttpError(upstreamStatus(response.status), '授权安装额度核销失败')
+    // 响应体在上面已经验过签,所以这里的错误码可以直接信任。调用方靠它把
+    // 「被更新的会话取代」「设备对不上」和真正的撤销分开说。
+    throw new UpstreamHttpError(upstreamStatus(response.status), '授权安装额度核销失败',
+      typeof parsed?.error === 'string' ? parsed.error : undefined)
   }
   if (!parsed || parsed.ok !== true) throw new Error('Console 安装额度核销响应无效')
   if (parsed.wireProtocolVersion !== WIRE_PROTOCOL_VERSION) {
