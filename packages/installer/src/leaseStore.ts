@@ -55,6 +55,9 @@ const FAILURE_EXEMPT_THRESHOLD = 2
 const FAILURE_STREAK_TTL_MS = 30 * 60 * 1_000
 
 export type InstallEventType = 'session.created' | 'stream.started' | 'stream.resumed' | 'stream.interrupted'
+  // 上一条流被同一会话的新连接接管(客户端在蓝牙链路重建后重拉)。与
+  // stream.interrupted 分开记:那是"没人读了",这是"换了个人读"。
+  | 'stream.superseded'
   | 'device.disconnected' | 'device.reconnect' | 'device.resumed' | 'install.failed' | 'install.completed'
 
 export class LeaseStore {

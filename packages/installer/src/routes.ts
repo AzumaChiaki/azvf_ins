@@ -484,6 +484,7 @@ export async function installerRoutes(app: FastifyInstance) {
         expiresAt,
         absoluteExpiresAt,
         state: 'created',
+        streamEpoch: 0,
       })
       leases.recordEvent({ sessionId, entitlementId: auth.entitlementId, resourceId, deviceAddress, event: 'session.created' })
       sendTelemetry(req, { sessionId, resourceId, deviceAddress }, 'install.started')
@@ -507,6 +508,16 @@ export async function installerRoutes(app: FastifyInstance) {
   app.get<{ Params: ControlParams }>('/api/session/:id/stream', { schema: { params: paramsSchema } }, async (req, reply) => {
     const hash = controlHash(req.headers['x-session-control'])
     const initial = hash ? sessions.authorizeControl(req.params.id, hash) : undefined
+    // 同一会话的上一条流还在跑时,新连接接管而不是被拒。安卓的 MASS 恢复包装器
+    // 在蓝牙链路重建后会拿同一份 SessionInit 从头重拉;蓝牙重建快到 1s 时,服务端
+    // 还没察觉上一条流已经没人读,会话仍停在 streaming,重拉就被 410 挡掉、整次
+    // 安装失败(生产实测:重连间隔中位 1s 的全被拒、53s 的全成功,纯粹是竞态)。
+    // 控制令牌已在上面校验,只有会话本人能接管。接管把会话退回 recoverable ——
+    // 与"等服务端自己察觉断开"落到的是同一个状态,后面照常走既有的 claimReplay
+    // 续传路径。客户端不需要任何改动,老版本直接受益。
+    if (initial && initial.state === 'streaming') {
+      sessions.supersedeStream(req.params.id, boundedExpiry(initial, config.installLeaseTtlSeconds))
+    }
     if (!initial || !['created', 'recoverable', 'delivered'].includes(initial.state)) {
       return reply.code(410).send({ error: '会话不存在、已过期或正在被其他连接使用' })
     }
@@ -557,6 +568,9 @@ export async function installerRoutes(app: FastifyInstance) {
       return reply.code(410).send({ error: '安装租约已失效' })
     }
     const activeSession = claimed
+    // 本条流的代数。被同一会话的新连接接管后代数会变,本流据此静默收手。
+    const streamEpoch = claimed.streamEpoch
+    const superseded = () => activeSession.streamEpoch !== streamEpoch
     leases.recordEvent({ sessionId: claimed.sessionId, entitlementId: claimed.entitlementId, resourceId: claimed.resourceId,
       deviceAddress: claimed.deviceAddress, event: resuming ? 'stream.resumed' : 'stream.started' })
     sendTelemetry(req, claimed, 'download.started')
@@ -625,6 +639,7 @@ export async function installerRoutes(app: FastifyInstance) {
       let pendingReal = pull()
       try {
         for (let transportSeq = 0; transportSeq < activeSession.frameSchedule.length; transportSeq++) {
+          if (superseded()) return
           if (activeSession.state === 'cancelled') throw new Error('安装会话已取消')
           const isReal = activeSession.frameSchedule[transportSeq] === 1
           let data: Uint8Array
@@ -682,6 +697,7 @@ export async function installerRoutes(app: FastifyInstance) {
           }
         }
         const finalPull = await pendingReal
+        if (superseded()) return
         if (activeSession.state === 'cancelled') throw new Error('安装会话已取消')
         if (finalPull.error) throw finalPull.error
         if (!finalPull.result?.done || realSeq !== activeSession.controlContext.realTotal) {
@@ -691,7 +707,12 @@ export async function installerRoutes(app: FastifyInstance) {
         completed = true
       } finally {
         if (!completed) await source.return?.(undefined).catch(() => undefined)
-        if (completed) {
+        if (superseded()) {
+          // 会话与租约现在归接管的新连接所有。这里再去 markRecoverable / release
+          // 会把新流从 streaming 拽回去甚至把它的租约释放掉,必须原样退出。
+          leases.recordEvent({ sessionId: activeSession.sessionId, entitlementId: activeSession.entitlementId,
+            resourceId: activeSession.resourceId, deviceAddress: activeSession.deviceAddress, event: 'stream.superseded' })
+        } else if (completed) {
           const renewedUntil = boundedExpiry(activeSession, config.installLeaseTtlSeconds)
           activeSession.expiresAt = renewedUntil
           if (!sessions.markDelivered(activeSession.sessionId)

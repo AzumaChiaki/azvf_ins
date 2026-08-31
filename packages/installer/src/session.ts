@@ -43,6 +43,13 @@ export interface InstallSession {
   expiresAt: number
   absoluteExpiresAt: number
   state: InstallSessionState
+  /**
+   * 本会话到目前为止开过的流的代数,每次进入 streaming 递增。
+   * 正在跑的生成器捕获自己那一代:一旦被同一会话的新连接接管,代数就变了,
+   * 旧生成器据此静默收手,绝不再去改已经归新连接所有的会话/租约状态。
+   * 老客户端不感知这个字段,行为不受影响。
+   */
+  streamEpoch: number
 }
 
 export class SessionStore {
@@ -121,6 +128,24 @@ export class SessionStore {
     const session = this.live(id)
     if (!session || session.state !== 'authorizing') return undefined
     session.state = 'streaming'
+    session.expiresAt = expiresAt
+    session.streamEpoch += 1
+    return session
+  }
+
+  /**
+   * 同一会话的新连接接管正在进行的流。把会话退回 recoverable,后续按既有的
+   * claimReplay 断点续传路径走 —— 与"等服务端自己察觉断开"落到的是同一个状态,
+   * 只是不必再等。控制令牌已在调用方校验过,所以只有会话本人能接管。
+   */
+  supersedeStream(id: string, expiresAt: number): InstallSession | undefined {
+    const session = this.live(id)
+    // 只接管 streaming:那说明已经有一条流在跑,可以靠 streamEpoch 让它干净退出。
+    // authorizing 是另一个请求正在建流的中间态(还在等 Console 的核销往返),
+    // 这时插进去会和它的 markStreaming 抢状态,而那条失败路径会 sessions.remove()
+    // 把会话直接销毁 —— 真正并发的重复请求仍按原样拒掉第二个。
+    if (!session || session.state !== 'streaming') return undefined
+    session.state = 'recoverable'
     session.expiresAt = expiresAt
     return session
   }
