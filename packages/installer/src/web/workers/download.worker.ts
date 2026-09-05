@@ -26,6 +26,31 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+type RetryableDownloadFailure = {
+  message: string
+  code?: string
+  retryAfterSeconds?: number
+}
+
+async function retryableDownloadFailure(response: Response): Promise<RetryableDownloadFailure | undefined> {
+  const body = await response.json().catch(() => undefined) as unknown
+  if (!body || typeof body !== 'object') return undefined
+  const record = body as Record<string, unknown>
+  if (record.retryable !== true) return undefined
+  const message = typeof record.error === 'string' && record.error.trim().length > 0 && record.error.length <= 512
+    ? record.error.trim()
+    : '安装会话暂时不可用，请重新发起安装。'
+  const code = typeof record.code === 'string' && /^[a-z][a-z0-9_]{1,80}$/.test(record.code)
+    ? record.code
+    : undefined
+  const retryAfterSeconds = typeof record.retryAfterSeconds === 'number'
+    && Number.isFinite(record.retryAfterSeconds)
+    && record.retryAfterSeconds > 0
+    ? Math.max(1, Math.ceil(record.retryAfterSeconds))
+    : undefined
+  return { message, ...(code ? { code } : {}), ...(retryAfterSeconds ? { retryAfterSeconds } : {}) }
+}
+
 let paused = false
 let aborted = false
 let started = false
@@ -108,7 +133,20 @@ self.onmessage = async (event: MessageEvent<InitMsg | ControlMsg>) => {
       headers: { 'x-session-control': controlToken },
       signal: abortController.signal,
     })
-    if (!response.ok || !response.body) throw new Error(`下载失败: HTTP ${response.status}`)
+    if (!response.ok || !response.body) {
+      const recovery = await retryableDownloadFailure(response)
+      self.postMessage({
+        type: 'error',
+        stage: 'download',
+        message: recovery?.message ?? `下载失败: HTTP ${response.status}`,
+        ...(recovery ? {
+          retryable: true,
+          ...(recovery.code ? { code: recovery.code } : {}),
+          ...(recovery.retryAfterSeconds ? { retryAfterSeconds: recovery.retryAfterSeconds } : {}),
+        } : {}),
+      })
+      return
+    }
     reader = response.body.getReader()
 
     let buffer = new Uint8Array(0)

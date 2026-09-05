@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { MiWearSession, requestSerialPort } from '../miwear/session.js'
-import { streamInstall, InstallCooldownError, type StreamProgress } from '../pipeline.js'
+import { streamInstall, InstallCooldownError, InstallRetryableError, type StreamProgress } from '../pipeline.js'
 import { AmbientLayer } from '@azvf/ui'
 import { InstallFooter } from './InstallFooter.js'
 import { runtimeConfig } from '@azvf/ui/runtime-config'
@@ -417,6 +417,9 @@ export function InstallApp() {
       if (error instanceof ReauthRedirect) return
       if (error instanceof InstallCooldownError) {
         setCooldownUntil(Date.now() + error.retryAfterSeconds * 1_000)
+        notify(error.message)
+      } else if (error instanceof InstallRetryableError) {
+        if (error.retryAfterSeconds) setCooldownUntil(Date.now() + error.retryAfterSeconds * 1_000)
         notify(error.message)
       } else {
         notify(`安装失败：${error instanceof Error ? error.message : String(error)}`)

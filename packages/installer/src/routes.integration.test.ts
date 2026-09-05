@@ -402,6 +402,13 @@ describe('Installer authenticated v3 route', () => {
 
       const missingControl = await app.inject({ method: 'GET', url: session.streamUrl })
       expect(missingControl.statusCode).toBe(410)
+      expect(missingControl.json()).toMatchObject({
+        code: 'install_session_unavailable',
+        reason: 'lease_session_unavailable',
+        action: 'retry',
+        retryable: true,
+        requestId: expect.any(String),
+      })
       const competingStreams = await Promise.all([
         app.inject({ method: 'GET', url: session.streamUrl, headers: { 'x-session-control': session.controlToken } }),
         app.inject({ method: 'GET', url: session.streamUrl, headers: { 'x-session-control': session.controlToken } }),

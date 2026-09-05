@@ -226,11 +226,40 @@ function trustedRegion(req: FastifyRequest): string {
 }
 
 
-function leaseError(reply: FastifyReply, error: LeaseError) {
+/**
+ * Lease state is inherently short-lived.  Return a stable recovery envelope so
+ * clients can retry/recreate a session instead of treating an expired lease as
+ * a permanent installation failure.  `reason` is deliberately coarse: lease
+ * capacity and session lifetime are useful to a legitimate client, while the
+ * underlying store/query details are not.
+ */
+function retryableLeaseFailure(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  status: number,
+  input: { error: string; code: string; reason: string; retryAfterSeconds?: number },
+) {
+  if (input.retryAfterSeconds !== undefined) reply.header('retry-after', String(input.retryAfterSeconds))
+  return reply.code(status).send({
+    error: input.error,
+    code: input.code,
+    reason: input.reason,
+    action: 'retry',
+    retryable: true,
+    ...(input.retryAfterSeconds === undefined ? {} : { retryAfterSeconds: input.retryAfterSeconds }),
+    requestId: request.id,
+  })
+}
+
+function leaseError(request: FastifyRequest, reply: FastifyReply, error: LeaseError) {
   const status = error.code === 'TOKEN_REPLAY' ? 409 : 429
-  const retryAfter = error.retryAfterSeconds ?? 30
-  if (status === 429) reply.header('retry-after', String(retryAfter))
-  return reply.code(status).send({ error: error.message, code: error.code, retryAfterSeconds: retryAfter })
+  const retryAfter = status === 429 ? error.retryAfterSeconds ?? 30 : undefined
+  return retryableLeaseFailure(request, reply, status, {
+    error: error.message,
+    code: error.code,
+    reason: error.code === 'TOKEN_REPLAY' ? 'install_token_needs_refresh' : 'lease_capacity_reached',
+    ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }),
+  })
 }
 
 /**
@@ -494,14 +523,33 @@ export async function installerRoutes(app: FastifyInstance) {
         sessions.remove(sessionId)
         leases.cancelCreation(sessionId, consumptionId)
       }
-      if (error instanceof LeaseError) return leaseError(reply, error)
+      if (error instanceof LeaseError) return leaseError(req, reply, error)
       if (error instanceof EntitlementDecisionError) {
         await acknowledgeDecision(sessionId, error).catch((ackError) => req.log.warn({ err: ackError, sessionId }, 'decision acknowledgement failed'))
         return decisionError(reply, error)
       }
-      if (error instanceof UpstreamHttpError) return reply.code(error.status).send({ error: error.message })
-      req.log.error({ err: error }, 'session creation failed')
-      return reply.code(502).send({ error: '无法安全建立安装会话' })
+      if (isTransientUpstreamFailure(error)) {
+        if (error instanceof UpstreamHttpError) {
+          req.log.warn({ err: error, sessionId }, 'session creation authorization check unavailable')
+        } else {
+          req.log.error({ err: error, sessionId }, 'session creation failed')
+        }
+        return retryableLeaseFailure(req, reply, 503, {
+          error: '授权校验暂时不可用，请稍后重试。',
+          code: 'authorization_check_unavailable',
+          reason: 'authorization_check_unavailable',
+          retryAfterSeconds: 5,
+        })
+      }
+      if (error instanceof UpstreamHttpError) return reply.code(error.status).send({ error: refusalMessage(error) })
+      // `isTransientUpstreamFailure` deliberately treats unknown local faults
+      // as retryable, so this is only a defensive fallback.
+      req.log.error({ err: error, sessionId }, 'session creation rejected')
+      return retryableLeaseFailure(req, reply, 503, {
+        error: '安装会话暂时不可用，请稍后重试。',
+        code: 'install_session_unavailable',
+        reason: 'lease_session_unavailable',
+      })
     }
   })
 
@@ -519,11 +567,21 @@ export async function installerRoutes(app: FastifyInstance) {
       sessions.supersedeStream(req.params.id, boundedExpiry(initial, config.installLeaseTtlSeconds))
     }
     if (!initial || !['created', 'recoverable', 'delivered'].includes(initial.state)) {
-      return reply.code(410).send({ error: '会话不存在、已过期或正在被其他连接使用' })
+      return retryableLeaseFailure(req, reply, 410, {
+        error: '安装会话不可用，请重新发起安装。',
+        code: 'install_session_unavailable',
+        reason: 'lease_session_unavailable',
+      })
     }
     const resuming = initial.state !== 'created'
     const claimed = resuming ? sessions.claimReplay(req.params.id) : sessions.claim(req.params.id)
-    if (!claimed) return reply.code(410).send({ error: '会话不存在、已过期或已消费' })
+    if (!claimed) {
+      return retryableLeaseFailure(req, reply, 410, {
+        error: '安装会话不可用，请重新发起安装。',
+        code: 'install_session_unavailable',
+        reason: 'lease_session_unavailable',
+      })
+    }
     try {
       const refreshed = await consumeEntitlement({
         entitlementId: claimed.entitlementId,
@@ -547,6 +605,14 @@ export async function installerRoutes(app: FastifyInstance) {
       req.log.warn({ err: error, sessionId: claimed.sessionId }, 'entitlement live-check rejected stream')
       sessions.remove(claimed.sessionId)
       leases.release(claimed.sessionId)
+      if (isTransientUpstreamFailure(error)) {
+        return retryableLeaseFailure(req, reply, 503, {
+          error: '授权校验暂时不可用，请稍后重试。',
+          code: 'authorization_check_unavailable',
+          reason: 'authorization_check_unavailable',
+          retryAfterSeconds: 5,
+        })
+      }
       if (error instanceof EntitlementDecisionError) {
         await acknowledgeDecision(claimed.sessionId, error).catch((ackError) => req.log.warn({ err: ackError }, 'decision acknowledgement failed'))
         return decisionError(reply, error)
@@ -556,7 +622,11 @@ export async function installerRoutes(app: FastifyInstance) {
     if (claimed.state !== 'authorizing') {
       sessions.remove(claimed.sessionId)
       leases.release(claimed.sessionId)
-      return reply.code(410).send({ error: '安装会话已取消' })
+      return retryableLeaseFailure(req, reply, 410, {
+        error: '安装会话状态已变化，请重新发起安装。',
+        code: 'install_session_unavailable',
+        reason: 'lease_session_unavailable',
+      })
     }
     const leaseExpiry = boundedExpiry(claimed, config.installLeaseTtlSeconds)
     const leaseReady = resuming ? leases.renew(claimed.sessionId, leaseExpiry)
@@ -565,7 +635,11 @@ export async function installerRoutes(app: FastifyInstance) {
       || !sessions.markStreaming(claimed.sessionId, leaseExpiry)) {
       sessions.remove(req.params.id)
       leases.release(req.params.id)
-      return reply.code(410).send({ error: '安装租约已失效' })
+      return retryableLeaseFailure(req, reply, 410, {
+        error: '安装租约已失效，请重新发起安装。',
+        code: 'install_lease_expired',
+        reason: 'lease_expired',
+      })
     }
     const activeSession = claimed
     // 本条流的代数。被同一会话的新连接接管后代数会变,本流据此静默收手。
@@ -758,7 +832,13 @@ export async function installerRoutes(app: FastifyInstance) {
   app.post<{ Params: ControlParams }>('/api/session/:id/heartbeat', { schema: { params: paramsSchema } }, async (req, reply) => {
     const hash = controlHash(req.headers['x-session-control'])
     const session = hash ? sessions.authorizeControl(req.params.id, hash) : undefined
-    if (!session || !['streaming', 'recoverable', 'delivered'].includes(session.state)) return reply.code(404).send({ error: 'not found' })
+    if (!session || !['streaming', 'recoverable', 'delivered'].includes(session.state)) {
+      return retryableLeaseFailure(req, reply, 410, {
+        error: '安装会话不可用，请重新发起安装。',
+        code: 'install_session_unavailable',
+        reason: 'lease_session_unavailable',
+      })
+    }
     try {
       const refreshed = await consumeEntitlement({
         entitlementId: session.entitlementId,
@@ -782,7 +862,12 @@ export async function installerRoutes(app: FastifyInstance) {
       // 租约仍有自己的 TTL 兜底,持续失败照样会自然到期。
       if (isTransientUpstreamFailure(error)) {
         req.log.warn({ err: error, sessionId: session.sessionId }, 'entitlement live-check unavailable; session kept')
-        return reply.code(503).header('retry-after', '5').send({ error: '授权校验暂时不可用,请稍后重试' })
+        return retryableLeaseFailure(req, reply, 503, {
+          error: '授权校验暂时不可用，请稍后重试。',
+          code: 'authorization_check_unavailable',
+          reason: 'authorization_check_unavailable',
+          retryAfterSeconds: 5,
+        })
       }
       req.log.warn({ err: error, sessionId: session.sessionId }, 'entitlement live-check rejected heartbeat')
       sessions.remove(session.sessionId)
@@ -797,7 +882,11 @@ export async function installerRoutes(app: FastifyInstance) {
     if (expiresAt <= Date.now() || !leases.renew(session.sessionId, expiresAt)) {
       sessions.remove(session.sessionId)
       leases.release(session.sessionId)
-      return reply.code(410).send({ error: '安装租约已到期' })
+      return retryableLeaseFailure(req, reply, 410, {
+        error: '安装租约已到期，请重新发起安装。',
+        code: 'install_lease_expired',
+        reason: 'lease_expired',
+      })
     }
     ;(session as InstallSession).expiresAt = expiresAt
     ;(session as InstallSession).lastHeartbeatAt = Date.now()

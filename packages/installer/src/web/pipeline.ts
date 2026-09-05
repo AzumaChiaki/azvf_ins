@@ -39,6 +39,39 @@ export class InstallCooldownError extends Error {
   }
 }
 
+/** A lease/session failure that becomes recoverable after refreshing/retrying. */
+export class InstallRetryableError extends Error {
+  constructor(message: string, public readonly code?: string, public readonly retryAfterSeconds?: number) {
+    super(message)
+    this.name = 'InstallRetryableError'
+  }
+}
+
+/**
+ * Keep the server's deliberately coarse recovery envelope intact when a
+ * control request fails after a session has already been created. Without
+ * this, a useful `retryable: true` response turns into an opaque "HTTP 410"
+ * before it reaches the installation UI.
+ */
+async function retryableControlFailure(response: Response, fallback: string): Promise<InstallRetryableError | undefined> {
+  const body = await response.json().catch(() => undefined) as unknown
+  if (!body || typeof body !== 'object') return undefined
+  const record = body as Record<string, unknown>
+  if (record.retryable !== true) return undefined
+  const message = typeof record.error === 'string' && record.error.trim().length > 0 && record.error.length <= 512
+    ? record.error.trim()
+    : fallback
+  const code = typeof record.code === 'string' && /^[a-z][a-z0-9_]{1,80}$/.test(record.code)
+    ? record.code
+    : undefined
+  const retryAfterSeconds = typeof record.retryAfterSeconds === 'number'
+    && Number.isFinite(record.retryAfterSeconds)
+    && record.retryAfterSeconds > 0
+    ? Math.max(1, Math.ceil(record.retryAfterSeconds))
+    : undefined
+  return new InstallRetryableError(message, code, retryAfterSeconds)
+}
+
 export interface StreamInstallOptions {
   session: MiWearSession
   authToken: string
@@ -316,12 +349,22 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
   }
   const response = await createInstallationSession(request)
   if (!response.ok) {
-    const body = await response.json().catch(() => ({})) as { error?: string; code?: string; retryAfterSeconds?: number }
+    const body = await response.json().catch(() => ({})) as {
+      error?: string
+      code?: string
+      retryAfterSeconds?: number
+      retryable?: boolean
+      action?: string
+    }
     if (response.status === 429) {
       const header = Number(response.headers.get('retry-after'))
       const retryAfter = Number.isFinite(body.retryAfterSeconds) ? Number(body.retryAfterSeconds)
         : Number.isFinite(header) ? header : 30
       throw new InstallCooldownError(body.error ?? '设备安装冷却中，请稍后重试', Math.max(1, Math.ceil(retryAfter)), body.code)
+    }
+    if (body.retryable === true) {
+      const retryAfter = Number.isFinite(body.retryAfterSeconds) ? Math.max(1, Math.ceil(Number(body.retryAfterSeconds))) : undefined
+      throw new InstallRetryableError(body.error ?? '安装会话暂时不可用，请重试。', body.code, retryAfter)
     }
     throw new Error(`建立会话失败: ${body.error ?? response.status}`)
   }
@@ -455,7 +498,20 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
         progress.downloaded = data.sent
         reportProgress(progress)
       } else if (data.type === 'error') {
-        fail(new Error(`下载线程错误: ${data.message}`))
+        const message = typeof data.message === 'string' && data.message.length > 0
+          ? data.message
+          : '下载线程发生未知错误'
+        const code = typeof data.code === 'string' && /^[a-z][a-z0-9_]{1,80}$/.test(data.code)
+          ? data.code
+          : undefined
+        const retryAfterSeconds = typeof data.retryAfterSeconds === 'number'
+          && Number.isFinite(data.retryAfterSeconds)
+          && data.retryAfterSeconds > 0
+          ? Math.max(1, Math.ceil(data.retryAfterSeconds))
+          : undefined
+        fail(data.retryable === true
+          ? new InstallRetryableError(message, code, retryAfterSeconds)
+          : new Error(`下载线程错误: ${message}`))
       }
     }
     decryptWorker.onmessage = (event) => {
@@ -573,9 +629,11 @@ export async function streamInstall(opts: StreamInstallOptions, callbacks: Strea
           return
         }
         heartbeatFailures++
-        const failure = new Error(`安装租约续期失败: HTTP ${result.status}`)
-        if (result.status === 404 || result.status === 410 || heartbeatFailures >= 3) activeFail?.(failure)
-        else log(`${failure.message}，将在后台重试（${heartbeatFailures}/3）`)
+        return retryableControlFailure(result, '安装租约暂时不可用，请重新发起安装。').then((recovery) => {
+          const failure = recovery ?? new Error(`安装租约续期失败: HTTP ${result.status}`)
+          if (result.status === 404 || result.status === 410 || heartbeatFailures >= 3) activeFail?.(failure)
+          else log(`${failure.message}，将在后台重试（${heartbeatFailures}/3）`)
+        })
       }).catch((error) => {
         heartbeatFailures++
         const failure = new Error(`安装租约续期失败: ${errorMessage(error)}`)
